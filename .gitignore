@@ -1,0 +1,22 @@
+# Data artifacts
+data/in/*
+data/out/*
+*.mp4
+*.avi
+
+# macOS
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Bazel / MediaPipe build outputs
+vendor/mediapipe/bazel-*
+vendor/mediapipe/.cache/
+vendor/mediapipe/.bazel*
+vendor/mediapipe/mediapipe/models/*.tflite
+
+# Logs
+*.log
