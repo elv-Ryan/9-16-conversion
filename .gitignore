@@ -20,3 +20,8 @@ vendor/mediapipe/mediapipe/models/*.tflite
 
 # Logs
 *.log
+data/in/
+data/out/
+data/tmp/
+*.avi
+*.mp4
