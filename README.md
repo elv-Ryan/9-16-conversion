@@ -1,87 +1,84 @@
-# 9:16 conversion using MediaPipe AutoFlip
+# 9:16 conversion using MediaPipe AutoFlip (Apple Silicon + Docker)
 
-A minimal, reproducible example that converts a \~16:9 input into 9:16
-vertical format using **MediaPipe AutoFlip**.
+A minimal, reproducible pipeline to reframe 16:9 videos into **presentation-grade 9:16**
+using **MediaPipe AutoFlip** on **macOS Apple Silicon (arm64)** via Docker.
 
-This repository is optimized for: - Apple Silicon (arm64) - Docker-based
-build and run - A lowest-friction path that is verified to work
-end-to-end
+Key properties of this repo’s “known-good” setup:
 
-------------------------------------------------------------------------
+- Stable on arm64 (Docker Desktop)
+- Uses **face-primary** reframing (object detection disabled for stability)
+- **Preserves full input height** (no zoom) by computing crops in the **raw** frame stream
+- Outputs MP4 from AutoFlip, then you can re-encode with ffmpeg if desired
+
+---
 
 ## Background
 
-AutoFlip is an intelligent video reframing framework from Google
-Research. It uses detection and scene signals (faces, objects, shot
-boundaries, borders, motion) to determine how to crop a video to a
-target aspect ratio.
+AutoFlip is an intelligent video reframing framework from Google Research. It uses detection and scene
+signals (faces, objects, shot boundaries, borders, motion) to determine how to crop a video to a target
+aspect ratio.
 
 References:
 
--   Google Research announcement:\
-    https://research.google/blog/autoflip-an-open-source-framework-for-intelligent-video-reframing/
+- Google Research announcement:
+  https://research.google/blog/autoflip-an-open-source-framework-for-intelligent-video-reframing/
+- MediaPipe AutoFlip documentation (legacy solution):
+  https://github.com/google-ai-edge/mediapipe/blob/master/docs/solutions/autoflip.md
 
--   MediaPipe AutoFlip documentation (legacy solution):\
-    https://github.com/google-ai-edge/mediapipe/blob/master/docs/solutions/autoflip.md
-
-------------------------------------------------------------------------
+---
 
 ## Current Working Configuration
 
-This repository builds and runs a stable AutoFlip pipeline on Apple
-Silicon via Docker.
+This repository builds and runs a stable AutoFlip pipeline on Apple Silicon via Docker.
 
 What works:
 
--   Builds `run_autoflip` from MediaPipe using Bazel inside an Ubuntu
-    22.04 arm64 container
--   Runs a stable AutoFlip graph configuration:
-    -   OpenCV video decode
-    -   Frame scaling and shot boundary detection
-    -   Face detection (enabled)
-    -   SceneCroppingCalculator with `aspect_ratio=9:16`
-    -   OpenCV video encode
--   Produces correct 9:16 output
+- Builds (or uses a prebuilt) `run_autoflip` binary inside an Ubuntu 22.04 arm64 container
+- Runs a stable AutoFlip graph configuration:
+  - OpenCV decode
+  - Shot boundary detection
+  - Face detection (enabled)
+  - SceneCroppingCalculator with `aspect_ratio=9:16`
+  - OpenCV encode
+- Produces clean 9:16 output at full input height (no zoom)
 
-Example:
+Typical example (720p input):
 
-Input: 832x480\
-Output: 270x480 (9:16)
+- Input: 1280x720
+- Output: 406x720 (9:16)
 
-------------------------------------------------------------------------
+---
 
-## What Is Disabled (and Why)
+## What Was Fixed (Important)
 
-### Object Detection
+### 1) Missing face detection model on host-mounted graphs
 
-The full AutoFlip graph (face + object detection) segfaults on arm64 in
-this Docker build.\
-This repository uses a **face-only configuration** to ensure a stable
-minimal demo.
+On some builds, AutoFlip expects to load face detection TFLite resources via a resource root.
+We copy the required file into the repo and pass `--resource_root_dir=/work/models`.
 
-### Audio Passthrough
+Required file:
 
-The stock AutoFlip graph attempts audio extraction and remuxing via
-OpenCV decoder side packets.\
-This fails in the current container configuration, so audio is
-intentionally removed.\
-Output is video-only.
+- `models/mediapipe/modules/face_detection/face_detection_full_range_sparse.tflite`
 
-### MP4 / H.264 Decode Reliability
+### 2) “Zoom” on longer videos (full height not preserved)
 
-OpenCV decoding inside the container is unreliable for certain MP4/H.264
-inputs on arm64.\
-The stable workaround is transcoding to MJPEG AVI before running
-AutoFlip.
+The critical fix is to compute cropping decisions using **raw frames**:
 
-------------------------------------------------------------------------
+- Use `KEY_FRAMES: video_raw` (not the scaled/downsampled stream) in `SceneCroppingCalculator`.
+
+This prevents the internal crop-size heuristics from drifting into a “zoom-like” behavior on longer videos.
+
+---
 
 ## Repository Structure
 
     .
     ├── Dockerfile.autoflip
     ├── graphs/
-    │   └── autoflip_graph_noaudio_faceonly.pbtxt
+    │   ├── autoflip_graph_faceprimary_target406x720_RAW.pbtxt
+    │   └── (other graphs)
+    ├── models/
+    │   └── mediapipe/modules/face_detection/face_detection_full_range_sparse.tflite
     ├── scripts/
     │   ├── 00_make_mjpeg_avi.sh
     │   └── 01_run_autoflip_faceonly_noaudio.sh
@@ -91,85 +88,140 @@ AutoFlip.
         ├── in/          (ignored)
         └── out/         (ignored)
 
-------------------------------------------------------------------------
+---
 
 ## Build Instructions
 
 ### Requirements
 
--   Docker Desktop
--   git
--   ffmpeg (host machine)
+- Docker Desktop
+- git
+- ffmpeg (host machine)
 
 ### Build the Docker Image
 
-    cd vendor/mediapipe
-    docker build --platform=linux/arm64 -t mediapipe-autoflip:cpu -f Dockerfile.autoflip .
+From the repo root:
 
-------------------------------------------------------------------------
+```bash
+cd vendor/mediapipe
+docker build --platform=linux/arm64 -t mediapipe-autoflip:cpu -f Dockerfile.autoflip .
+```
 
-## Run Instructions
+---
 
-### Step 1: Convert Input to MJPEG AVI
+## Run Instructions (Step by Step)
 
-OpenCV decode is most reliable with MJPEG AVI in this setup:
+### Step 1: Convert input to MJPEG AVI (recommended for decode stability)
 
-    ./scripts/00_make_mjpeg_avi.sh /path/to/input.mp4
-
-This writes an AVI file into `data/in/`.
-
-------------------------------------------------------------------------
-
-### Step 2: Run AutoFlip (Face-Only, No Audio)
-
-    ./scripts/01_run_autoflip_faceonly_noaudio.sh
-
-Output is written to `data/out/`.
-
-------------------------------------------------------------------------
-
-### Step 3: Verify Output Aspect Ratio
-
-    ffprobe -v error -select_streams v:0 -show_entries stream=width,height   -of default=noprint_wrappers=1:nokey=0 data/out/*.mp4
-
-Expected output ratio ≈ 9:16.
-
-------------------------------------------------------------------------
-
-## Known Issues
-
-1.  Re-enable object detection safely on arm64\
-    Likely requires modifying TFLite inference configuration (delegates,
-    XNNPACK, threading) or replacing the object detection subgraph.
-
-2.  Restore audio\
-    Practical solution: run AutoFlip video-only, then mux original audio
-    back using ffmpeg.
-
-3.  Improve decode pipeline\
-    Replace OpenCV decoder with FFmpeg-based decode stage or feed frame
-    sequences into MediaPipe.
-
-------------------------------------------------------------------------
-
-## Notes on Aspect Ratio
-
-`SceneCroppingCalculator` expects aspect ratio as a string in the form:
-
-    width:height
+OpenCV decode inside the container is most reliable with MJPEG AVI on arm64.
 
 Example:
 
-    9:16
+```bash
+./scripts/00_make_mjpeg_avi.sh "/path/to/input.mp4"
+```
 
-Not a float value.
+This writes an AVI file into `data/in/`.
 
-------------------------------------------------------------------------
+---
+
+### Step 2: Ensure face detection model exists under `models/`
+
+Verify:
+
+```bash
+ls -lh models/mediapipe/modules/face_detection/face_detection_full_range_sparse.tflite
+```
+
+If it is missing, AutoFlip face detection will fail with “Failed to load resource”.
+
+---
+
+### Step 3: Run AutoFlip using the RAW graph (no-zoom, full-height preserved)
+
+**Important:** `aspect_ratio` must be passed as a string like `9:16` (not a float).
+
+**Important:** on zsh, wrap the entire `--input_side_packets=...` argument in quotes because `[...]`
+in filenames triggers glob expansion.
+
+Example (Sunflower):
+
+```bash
+docker run --rm \
+  --cpus="8" --memory="40g" \
+  -v "/Users/ryan-renslow/projects/916_conversion:/work" \
+  -w /work \
+  mediapipe-autoflip:cpu \
+  /root/.cache/bazel/_bazel_root/1e0bb3bee2d09d2e4ad3523530d3b40c/execroot/mediapipe/bazel-out/aarch64-opt/bin/mediapipe/examples/desktop/autoflip/run_autoflip \
+    --resource_root_dir=/work/models \
+    --calculator_graph_config_file=/work/graphs/autoflip_graph_faceprimary_target406x720_RAW.pbtxt \
+    "--input_side_packets=input_video_path=/work/data/in/sunflower_full__mjpeg.avi,output_video_path=/work/data/out/sunflower_full_9x16_RAW.mp4,aspect_ratio=9:16"
+```
+
+Outputs go to `data/out/`.
+
+---
+
+### Step 4: Verify output dimensions
+
+```bash
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 data/out/*_9x16_RAW.mp4
+```
+
+Expected (for 720p inputs):
+
+```text
+406,720
+```
+
+---
+
+## Graph Notes (RAW graph)
+
+In `graphs/autoflip_graph_faceprimary_target406x720_RAW.pbtxt`, the critical section is:
+
+- `VIDEO_FRAMES:video_raw`
+- `KEY_FRAMES:video_raw`
+- `target_width: 406`
+- `target_height: 720`
+- `target_size_type: USE_TARGET_DIMENSION`
+
+This is the combination that preserves full height and avoids zoom.
+
+---
+
+## Known Issues / Next Improvements
+
+1) Object detection on arm64
+- The full face + object graph may crash on some arm64 builds.
+- This repo prioritizes stability (face-primary) first.
+
+2) Audio
+- Current pipeline is video-only in AutoFlip.
+- If you need audio, mux it back with ffmpeg after reframing.
+
+3) Decode robustness
+- If OpenCV decode fails on certain inputs, MJPEG AVI is the pragmatic workaround.
+
+---
+
+## Notes on Aspect Ratio
+
+`SceneCroppingCalculator` expects aspect ratio as:
+
+```text
+9:16
+```
+
+Not a float like `0.5625`.
+
+---
 
 ## Status
 
 Verified working on Apple Silicon (M-series):
 
--   Docker build succeeds
--   Face-aware vertical reframing succeeds
--   Output confirmed to be 9:16
+- Docker image builds
+- Face-aware vertical reframing succeeds
+- Full-height preserved (no zoom) using RAW graph
+- Output confirmed to be 9:16
