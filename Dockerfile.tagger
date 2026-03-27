@@ -1,0 +1,9 @@
+FROM localhost/mediapipe-autoflip:cpu
+
+WORKDIR /work
+
+COPY container/run_tagger.py /app/run_tagger.py
+
+RUN chmod +x /app/run_tagger.py
+
+ENTRYPOINT ["python3", "/app/run_tagger.py"]
