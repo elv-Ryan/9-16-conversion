@@ -250,6 +250,19 @@ cc_test(
     ],
 )
 
+
+cc_library(
+    name = "external_render_frame_to_json_calculator",
+    srcs = ["external_render_frame_to_json_calculator.cc"],
+    deps = [
+        "//mediapipe/examples/desktop/autoflip:autoflip_messages_cc_proto",
+        "//mediapipe/framework:calculator_framework",
+        "//mediapipe/framework/port:ret_check",
+        "//mediapipe/framework/port:status",
+    ],
+    alwayslink = 1,
+)
+
 cc_library(
     name = "signal_fusing_calculator",
     srcs = ["signal_fusing_calculator.cc"],

@@ -47,6 +47,7 @@ cc_binary(
         "//mediapipe/examples/desktop/autoflip/calculators:face_to_region_calculator",
         "//mediapipe/examples/desktop/autoflip/calculators:localization_to_region_calculator",
         "//mediapipe/examples/desktop/autoflip/calculators:scene_cropping_calculator",
+        "//mediapipe/examples/desktop/autoflip/calculators:external_render_frame_to_json_calculator",
         "//mediapipe/examples/desktop/autoflip/calculators:shot_boundary_calculator",
         "//mediapipe/examples/desktop/autoflip/calculators:signal_fusing_calculator",
         "//mediapipe/examples/desktop/autoflip/calculators:video_filtering_calculator",
