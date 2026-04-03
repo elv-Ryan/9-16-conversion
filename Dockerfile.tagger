@@ -1,4 +1,4 @@
-FROM localhost/916-autoflip-clean:dev
+FROM localhost/mediapipe-autoflip:new
 
 WORKDIR /work
 

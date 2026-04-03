@@ -45,4 +45,5 @@ RUN bazel build -c opt --define MEDIAPIPE_DISABLE_GPU=1 \
   --repo_env=CC=clang --repo_env=CXX=clang++ \
   --action_env=CC=clang --action_env=CXX=clang++ \
   --copt=-I/usr/include/opencv4 --cxxopt=-I/usr/include/opencv4 \
+  --copt="-march=native" --define xnn_enable_avxvnni=false --define xnn_enable_avxvnniint8=false \
   mediapipe/examples/desktop/autoflip:run_autoflip
