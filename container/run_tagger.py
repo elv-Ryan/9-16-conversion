@@ -317,7 +317,7 @@ def main():
                         "additional_info": {
                             "x-coordinates": shot_xs
                         },
-                        "source_media": source_media
+                        "source_media": "not_determined"
                     }
                 }
             )
@@ -326,7 +326,8 @@ def main():
             os.remove(x_jsonl_path)
 
         ## append progress dump
-        all_records.append({"type": "progress", "data" : { "source_media": source_media }})
+        for f in file_list:
+            all_records.append({"type": "progress", "data" : { "source_media": f }})
 
     concatter.join()
     write_pretty_json(output_path, all_records)
