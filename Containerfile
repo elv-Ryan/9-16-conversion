@@ -92,4 +92,8 @@ COPY container/run_tagger.py /app/run_tagger.py
 RUN chmod +x /app/run_tagger.py
 RUN ls -l /app
 
+RUN mkdir -p /elv
+WORKDIR /elv
+
 ENTRYPOINT ["python3", "/app/run_tagger.py"]
+
