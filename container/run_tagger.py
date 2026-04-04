@@ -197,6 +197,7 @@ def combine_to_pipe_no_temp(video_files, pipe_name="video_stream.mp4"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-path", required=True)
+    ap.add_argument("--params", required=False)
     ap.add_argument(
         "--graph",
         default="/work/graphs/autoflip_graph_faceprimary_target406x720_RAW_with_x.pbtxt",
