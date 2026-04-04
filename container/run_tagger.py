@@ -317,7 +317,7 @@ def main():
                         "additional_info": {
                             "x-coordinates": shot_xs
                         },
-                        "source_media": "not_determined"
+                        "source_media": file_list[0]
                     }
                 }
             )
