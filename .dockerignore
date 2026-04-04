@@ -1,29 +1,9 @@
-# Huge local artifacts
-data/
-Backup/
-.venv-signals/
-.venv/
-__pycache__/
-*.pyc
-*.log
-.DS_Store
+**
 
-# Git metadata
-.git/
-.gitmodules
+!vendor
+vendor/mediapipe/bazel/**
 
-# Python caches
-**/__pycache__/
-**/*.pyc
-
-# macOS
-**/.DS_Store
-
-# Keep MediaPipe source, but ignore its heavy build/cache outputs
-vendor/mediapipe/bazel-*
-vendor/mediapipe/.cache/
-
-# Optional local archives
-*.zip
-*.tar
-*.tar.gz
+!graphs/**
+!models/**
+!unbazelify/**
+!container/**

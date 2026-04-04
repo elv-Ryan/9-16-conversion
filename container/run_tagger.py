@@ -5,7 +5,10 @@ import os
 import re
 import subprocess
 import sys
+import glob
 from pathlib import Path
+from multiprocessing import Process
+import time
 
 
 SHOT_RE = re.compile(r"Shot change at:\s*([0-9]+(?:\.[0-9]+)?)\s*seconds\.")
@@ -17,6 +20,7 @@ def eprint(*args, **kwargs):
 
 def find_run_autoflip() -> str:
     candidates = [
+        "/runfiles/mediapipe/mediapipe/examples/desktop/autoflip/run_autoflip", 
         "/work/vendor/mediapipe/bazel-bin/mediapipe/examples/desktop/autoflip/run_autoflip",
         "/work/bazel-bin/mediapipe/examples/desktop/autoflip/run_autoflip",
     ]
@@ -137,8 +141,57 @@ def derive_focus_tag(graph_path: str) -> str:
 
 def write_pretty_json(output_path: Path, records):
     with output_path.open("w", encoding="utf-8") as f:
-        json.dump(records, f, indent=4)
-        f.write("\n")
+        for record in records:            
+            json.dump(record, f)
+            f.write("\n")
+
+def combine_to_pipe_no_temp(video_files, pipe_name="video_stream.mp4"):
+    video_files = sorted(video_files) ##glob.glob(os.path.join(os.path.abspath(directory), "*.mp4")))
+    
+    if not video_files:
+        raise Exception("No MP4 files specified.")
+        return
+
+
+    # make concat spec
+    ## TODO handle relative paths for local testing
+    ##concat_content = "\n".join([f"file 'f' for f in video_files])
+
+    concat_content = "".join([f"file 'file:{os.path.abspath(f)}'\n" for f in video_files])
+    
+    ## prep & run ffmpeg
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        '-protocol_whitelist', 'pipe,file', '-i', 'pipe:0',
+        "-c", "copy",
+        "-f", "mp4",
+##        "-movflags", "frag_keyframe+empty_moov",
+        pipe_name
+    ]
+
+    print(f"Streaming to {pipe_name}... (Awaiting reader)", file = sys.stderr)
+    
+    try:
+        # 5. Use Popen and communicate the string to stdin
+        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout = sys.stdout, stderr = sys.stdout, text=True)
+
+        print(f"subprocess.Popen done", file = sys.stderr)
+
+        # This sends the string to FFmpeg's stdin and then closes it
+        process.communicate(input=concat_content)
+
+        print(f"process.communicate done", file = sys.stderr)
+
+    except KeyboardInterrupt as ki:
+        process.terminate()
+        raise ki
+    finally:
+        print("Done.", file = sys.stderr)
+
+        
+    
 
 
 def main():
@@ -174,14 +227,29 @@ def main():
 
     all_records = []
 
+    file_list = []
     for raw in sys.stdin:
-        source_media = raw.strip()
-        if not source_media:
+        a_source_file = raw.strip()
+        if not a_source_file:
             continue
 
-        if not os.path.exists(source_media):
-            raise FileNotFoundError(f"input file does not exist: {source_media}")
+        if not os.path.exists(a_source_file):
+            raise FileNotFoundError(f"input file does not exist: {a_source_file}")
 
+        file_list += [ a_source_file ]
+
+
+    print("The file list")
+    print(file_list)
+    
+    source_media = "video_stream.mp4"
+    concatter = Process(target = combine_to_pipe_no_temp, args = [file_list])
+
+    print("calling concatter.start")
+    concatter.start()
+    concatter.join()
+        
+    if True:        
         stem = Path(source_media).stem
         output_media = str(artifacts_dir / f"{stem}{args.output_suffix}")
         x_jsonl_path = str(artifacts_dir / f"{stem}.x.jsonl")
@@ -257,6 +325,10 @@ def main():
         if os.path.exists(x_jsonl_path):
             os.remove(x_jsonl_path)
 
+        ## append progress dump
+        all_records.append({"type": "progress", "data" : { "source_media": source_media }})
+
+    concatter.join()
     write_pretty_json(output_path, all_records)
     return 0
 
