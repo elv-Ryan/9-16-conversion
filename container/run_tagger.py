@@ -145,7 +145,7 @@ def write_pretty_json(output_path: Path, records):
             json.dump(record, f)
             f.write("\n")
 
-def combine_to_pipe_no_temp(video_files, pipe_name="video_stream.mp4"):
+def combine_video(video_files, pipe_name="video_stream.mp4"):
     video_files = sorted(video_files) ##glob.glob(os.path.join(os.path.abspath(directory), "*.mp4")))
     
     if not video_files:
@@ -244,7 +244,7 @@ def main():
     print(file_list)
     
     source_media = "video_stream.mp4"
-    concatter = Process(target = combine_to_pipe_no_temp, args = [file_list])
+    concatter = Process(target = combine_video, args = [file_list])
 
     print("calling concatter.start")
     concatter.start()

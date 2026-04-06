@@ -25,3 +25,5 @@ data/out/
 data/tmp/
 *.avi
 *.mp4
+version
+test-output
