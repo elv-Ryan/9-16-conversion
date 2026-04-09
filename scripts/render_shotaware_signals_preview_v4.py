@@ -98,7 +98,7 @@ def main():
     ap.add_argument("--mode", choices=["sports", "movie"], default="sports")
 
     ap.add_argument("--model", default="models/mp_tasks/object_detector/efficientdet_lite0_int8_1.tflite")
-    ap.add_argument("--crop_w", type=int, default=406)
+    ap.add_argument("--crop_w", type=int, default=-1)
     ap.add_argument("--crop_h", type=int, default=720)
 
     ap.add_argument("--score_person", type=float, default=0.35)
@@ -115,6 +115,11 @@ def main():
 
     out_video = Path(args.out_video)
     out_video.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.crop_w == -1:
+        r = round(args.crop_h * .5625000)
+        if r % 2 != 0: r = r + 1
+        args.crop_w = r
 
     if args.crop_w % 2 != 0:
         raise SystemExit(f"ERROR: crop_w must be even for libx264. Got crop_w={args.crop_w}")
