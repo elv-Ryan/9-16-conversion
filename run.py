@@ -548,8 +548,8 @@ def main():
                         "start_time": start_time,
                         "end_time": end_time,
                         "track": "focus",
+                        "source_media": input_files[0]
                     },
-                    "source_media": input_files[0]
                 }
                                         
             ## this is not fps, but still better than every frame
