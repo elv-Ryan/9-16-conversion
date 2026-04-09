@@ -580,9 +580,9 @@ def main():
                                 "x1": x1,
                                 "y1": y1,
                             }
-                        }
+                        },
+                        "source_media": input_files[0]
                     },
-                    "source_media": input_files[0]
                 }
                 print(json.dumps(record), file = output_file)
 
