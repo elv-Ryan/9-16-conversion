@@ -2,6 +2,7 @@
 
 from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
+import sys
 import argparse
 import json
 import subprocess
@@ -123,8 +124,6 @@ def main():
     ap.add_argument("--params", default=None)
 
     ap.add_argument("--model", default=None)
-    ap.add_argument("--crop_w", type=int, default=-1)
-    ap.add_argument("--crop_h", type=int, default=720)
 
     ap.add_argument("--score_person", type=float, default=None)
     ap.add_argument("--score_ball", type=float, default=None)
@@ -132,19 +131,15 @@ def main():
     ap.add_argument("--max_dx", type=float, default=None)
     ap.add_argument("--action_hold_sec", type=float, default=None)
     
-    ap.add_argument("--output_file", default="out.jsonl")
+    ap.add_argument("--output-file", default="out.jsonl")
     args = ap.parse_args()
 
+    output_file = open(args.output_file, "w")
+
+    ### xxx add unhandled exception handler
+    
     out_video = Path(args.out_video)
     out_video.parent.mkdir(parents=True, exist_ok=True)
-
-    if args.crop_w == -1:
-        r = round(args.crop_h * .5625000)
-        if r % 2 != 0: r = r + 1
-        args.crop_w = r
-
-    if args.crop_w % 2 != 0:
-        raise SystemExit(f"ERROR: crop_w must be even for libx264. Got crop_w={args.crop_w}")
 
     if args.overlay_video is None:
         args.overlay_video = str(out_video.with_suffix("")) + ".overlay.mp4"
@@ -155,21 +150,7 @@ def main():
   
     for i, shot in enumerate(shots):
       shot["shot_id"] = i
-  
-    cap = cv2.VideoCapture(args.in_video)
-    if not cap.isOpened():
-        raise SystemExit(f"ERROR: cannot open {args.in_video}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    if args.crop_h != H:
-        raise SystemExit(f"ERROR: expects crop_h==input_h. crop_h={args.crop_h} input_h={H}")
-    if args.crop_w > W:
-        raise SystemExit(f"ERROR: crop_w {args.crop_w} > input_w {W}")
-
-    BaseOptions = mp_python.BaseOptions
+      
     base_options = mp_python.BaseOptions(
         model_asset_path=params.model,
         delegate=mp_python.BaseOptions.Delegate.GPU
@@ -208,124 +189,162 @@ def main():
     ball_det_frames = 0
     ball_inside_raw = 0
 
-    while True:
-        ok, frame_bgr = cap.read()
-        if not ok:
-            break
+    fps = None
 
-        t_sec = frame_idx / fps
-        while shot_idx < len(shot_edges) and t_sec >= shot_edges[shot_idx][1] - 1e-6:
-            shot_idx += 1
-            last_ball_cx = None
-            last_ball_frame = -10_000
-            last_action_cx = None
-            last_action_frame = -10_000
+    
+    for input_filename in sys.stdin:
+        input_filename = input_filename.strip()
+        print("reading " + input_filename)
+        
+        cap = cv2.VideoCapture(input_filename)
+        if not cap.isOpened():
+            raise SystemExit(f"ERROR: cannot open {input_filename}")
+    
+        if fps is None:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps is None:
+                raise Exception("could not determine framerate")
 
-        if shot_idx >= len(shot_edges):
-            shot_idx = len(shot_edges) - 1
+        if fps != cap.get(cv2.CAP_PROP_FPS):
+            raise Exception("Variable FPS, panic")
+        
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        ts_ms = int(round(t_sec * 1000.0))
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        crop_h = H
+        r = round(crop_h * .5625000)
+        if r % 2 != 0: r = r + 1
+        crop_w = r
+        
+        if crop_h != H:
+            raise SystemExit(f"ERROR: expects crop_h==input_h. crop_h={crop_h} input_h={H}")
+        if crop_w > W:
+            raise SystemExit(f"ERROR: crop_w {crop_w} > input_w {W}")
 
-        frame_resized = frame_rgb ##cv2.resize(frame_rgb, (320, 320))
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_resized)
+        if crop_w % 2 != 0:
+            raise SystemExit(f"ERROR: crop_w must be even for libx264. Got crop_w={crop_w}")
 
-        ##print(f"DEBUG: Frame shape: {frame_resized.shape}, dtype: {frame_resized.dtype}, contiguous: {frame_resized.flags['C_CONTIGUOUS']}")
-        res = detector.detect_for_video(mp_image, ts_ms)
-        best_ball = None
-        persons = []
-
-        for d in res.detections:
-            if not d.categories:
-                continue
-            cat = d.categories[0]
-            name = (getattr(cat, "category_name", None) or getattr(cat, "display_name", None) or "").lower()
-            score = float(cat.score)
-            bb = bbox_from_objdet(d.bounding_box, W, H)
-            area = float(bbox_area(bb))
-            cx = float(bbox_center_x(bb))
-
-            if name == "sports ball" and score >= params.score_ball:
-                cand = (score, area, cx, bb)
-                if (best_ball is None) or (score * area) > (best_ball[0] * best_ball[1]):
-                    best_ball = cand
-            elif name == "person" and score >= params.score_person:
-                persons.append((score, area, cx, bb))
-
-        motion_cx = motion_centroid(prev_gray, frame_gray)
-        prev_gray = frame_gray
-        if motion_cx is not None:
-            last_action_cx = motion_cx
-            last_action_frame = frame_idx
-
-        reason = "hold"
-        target_cx = None
-        ball_present = False
-        focus_bbox = None
-
-        if params.mode == "sports":
-            if best_ball is not None:
-                ball_present = True
-                ball_det_frames += 1
-                _, _, cx, bb = best_ball
-                last_ball_cx = cx
-                last_ball_frame = frame_idx
-                target_cx = cx
-                focus_bbox = bb
-                reason = "ball"
-
-                x0 = clamp(int(round(cx - args.crop_w / 2)), 0, W - args.crop_w)
-                bx0 = bb[0]
-                bx1 = bb[2]
-                if (bx0 >= x0) and (bx1 <= x0 + args.crop_w):
-                    ball_inside_raw += 1
-
-            elif persons:
-                if last_ball_cx is not None and (frame_idx - last_ball_frame) <= int(round(1.0 * fps)):
-                    best = min(persons, key=lambda p: abs(p[2] - last_ball_cx))
-                    target_cx = best[2]
-                    focus_bbox = best[3]
-                    reason = "person_near_ball"
-                else:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+    
+            t_sec = frame_idx / fps
+            while shot_idx < len(shot_edges) and t_sec >= shot_edges[shot_idx][1] - 1e-6:
+                shot_idx += 1
+                last_ball_cx = None
+                last_ball_frame = -10_000
+                last_action_cx = None
+                last_action_frame = -10_000
+    
+            if shot_idx >= len(shot_edges):
+                shot_idx = len(shot_edges) - 1
+    
+            ts_ms = int(round(t_sec * 1000.0))
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    
+            frame_resized = frame_rgb ##cv2.resize(frame_rgb, (320, 320))
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_resized)
+    
+            res = detector.detect_for_video(mp_image, ts_ms)
+            best_ball = None
+            persons = []
+    
+            for d in res.detections:
+                if not d.categories:
+                    continue
+                cat = d.categories[0]
+                name = (getattr(cat, "category_name", None) or getattr(cat, "display_name", None) or "").lower()
+                score = float(cat.score)
+                bb = bbox_from_objdet(d.bounding_box, W, H)
+                area = float(bbox_area(bb))
+                cx = float(bbox_center_x(bb))
+    
+                if name == "sports ball" and score >= params.score_ball:
+                    cand = (score, area, cx, bb)
+                    if (best_ball is None) or (score * area) > (best_ball[0] * best_ball[1]):
+                        best_ball = cand
+                elif name == "person" and score >= params.score_person:
+                    persons.append((score, area, cx, bb))
+    
+            motion_cx = motion_centroid(prev_gray, frame_gray)
+            prev_gray = frame_gray
+            if motion_cx is not None:
+                last_action_cx = motion_cx
+                last_action_frame = frame_idx
+    
+            reason = "hold"
+            target_cx = None
+            ball_present = False
+            focus_bbox = None
+    
+            if params.mode == "sports":
+                if best_ball is not None:
+                    ball_present = True
+                    ball_det_frames += 1
+                    _, _, cx, bb = best_ball
+                    last_ball_cx = cx
+                    last_ball_frame = frame_idx
+                    target_cx = cx
+                    focus_bbox = bb
+                    reason = "ball"
+    
+                    x0 = clamp(int(round(cx - crop_w / 2)), 0, W - crop_w)
+                    bx0 = bb[0]
+                    bx1 = bb[2]
+                    if (bx0 >= x0) and (bx1 <= x0 + crop_w):
+                        ball_inside_raw += 1
+    
+                elif persons:
+                    if last_ball_cx is not None and (frame_idx - last_ball_frame) <= int(round(1.0 * fps)):
+                        best = min(persons, key=lambda p: abs(p[2] - last_ball_cx))
+                        target_cx = best[2]
+                        focus_bbox = best[3]
+                        reason = "person_near_ball"
+                    else:
+                        best = max(persons, key=lambda p: p[1] * p[0])
+                        target_cx = best[2]
+                        focus_bbox = best[3]
+                        reason = "person_big"
+    
+                elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
+                    target_cx = last_action_cx
+                    reason = "action"
+    
+            elif params.mode == "movie":
+                if persons:
                     best = max(persons, key=lambda p: p[1] * p[0])
                     target_cx = best[2]
                     focus_bbox = best[3]
                     reason = "person_big"
+                elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
+                    target_cx = last_action_cx
+                    reason = "action"
+    
+            if target_cx is None:
+                target_cx = W / 2.0
+                reason = "center"
+    
+            tx = int(round(target_cx - crop_w / 2))
+            tx = clamp(tx, 0, W - crop_w)
+    
+            raw_x.append(tx)
+            raw_reason.append(reason)
+            raw_shot.append(shot_idx)
+            raw_ball_present.append(1 if ball_present else 0)
+            raw_target_cx.append(float(target_cx))
+            raw_t_sec.append(float(t_sec))
+            raw_focus_bbox.append(focus_bbox)
 
-            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
-                target_cx = last_action_cx
-                reason = "action"
+            frame_idx += 1
+            total_frames += 1
 
-        elif params.mode == "movie":
-            if persons:
-                best = max(persons, key=lambda p: p[1] * p[0])
-                target_cx = best[2]
-                focus_bbox = best[3]
-                reason = "person_big"
-            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
-                target_cx = last_action_cx
-                reason = "action"
+        cap.release()
 
-        if target_cx is None:
-            target_cx = W / 2.0
-            reason = "center"
+        ## this is a lie but we want to report some progress
+        print(json.dumps({"type": "progress", "data" : { "source_media": input_filename }}) + "\n", file=output_file)
 
-        tx = int(round(target_cx - args.crop_w / 2))
-        tx = clamp(tx, 0, W - args.crop_w)
-
-        raw_x.append(tx)
-        raw_reason.append(reason)
-        raw_shot.append(shot_idx)
-        raw_ball_present.append(1 if ball_present else 0)
-        raw_target_cx.append(float(target_cx))
-        raw_t_sec.append(float(t_sec))
-        raw_focus_bbox.append(focus_bbox)
-
-        frame_idx += 1
-        total_frames += 1
-
-    cap.release()
     detector.close()
 
     raw_x = np.asarray(raw_x, dtype=np.float32)
@@ -340,7 +359,7 @@ def main():
         xs = raw_x[idx]
         xs = gaussian_smooth(xs, sigma=params.sigma_frames)
         xs = vel_clamp_fb(xs, max_dx=params.max_dx)
-        xs = np.clip(xs, 0, W - args.crop_w)
+        xs = np.clip(xs, 0, W - crop_w)
         smooth_x[idx] = xs
 
     raw_dx = np.abs(np.diff(raw_x)).mean() if len(raw_x) > 1 else 0.0
@@ -352,7 +371,7 @@ def main():
               "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
               "-f", "rawvideo",
               "-pix_fmt", "bgr24",
-              "-s", f"{args.crop_w}x{H}",
+              "-s", f"{crop_w}x{H}",
               "-r", f"{fps}",
               "-i", "-",
               "-c:v", "libx264",
@@ -370,7 +389,7 @@ def main():
           if not ok or i >= len(smooth_x):
               break
           x0 = int(round(float(smooth_x[i])))
-          crop = frame_bgr[:, x0:x0 + args.crop_w]
+          crop = frame_bgr[:, x0:x0 + crop_w]
           ff.stdin.write(crop.tobytes())
           i += 1
       cap2.release()
@@ -404,7 +423,7 @@ def main():
           reason = raw_reason[i]
           color = focus_color_bgr(reason)
           x0 = int(round(float(smooth_x[i])))
-          x1 = min(W - 1, x0 + args.crop_w - 1)
+          x1 = min(W - 1, x0 + crop_w - 1)
 
           cv2.rectangle(frame_bgr, (x0, 0), (x1, H - 1), (180, 180, 180), 2)
 
@@ -434,7 +453,6 @@ def main():
         if not shot_reason_order[int(sid)] or shot_reason_order[int(sid)][-1] != reason:
             shot_reason_order[int(sid)].append(reason)
     
-    tags_doc = []
     for s in shots:
         sid = int(s["shot_id"])
         idx = np.where(raw_shot == sid)[0]
@@ -449,7 +467,7 @@ def main():
 
         focus_labels = []
         for j in idx.tolist():
-            center_x_norm = float((smooth_x[j] + (args.crop_w / 2.0)) / float(W))
+            center_x_norm = float((smooth_x[j] + (crop_w / 2.0)) / float(W))
             center_x_norm = max(0.0, min(1.0, center_x_norm))
             x_coords.append(round(center_x_norm, 6))
             focus_labels.append(raw_reason[j])
@@ -460,27 +478,27 @@ def main():
         reason_counts = shot_reason_counts.get(sid, Counter())
         tag_name = reason_counts.most_common(1)[0][0]
         
-        tags_doc.append(
-            {
-                "type": "tag",
-                "data": {
-                    "tag": tag_name,
-                    "start_time": start_ms,
-                    "end_time": end_ms,
-                    "track": "vertical_video",
-                    "frame_info": {
-                        "frame_idx": start_frame_idx
-                    },
-                    "additional_info": {
-                        "x-coordinates": x_coords,
-                        "reasons": dict(reason_counts)
-                        ##"focus-labels": focus_labels
-                        
-                    },
-                    "source_media": args.in_video
-                }
+        record = {
+            "type": "tag",
+            "data": {
+                "tag": tag_name,
+                "start_time": start_ms,
+                "end_time": end_ms,
+                "track": "vertical_video",
+                "frame_info": {
+                    "frame_idx": start_frame_idx
+                },
+                "additional_info": {
+                    "x-coordinates": x_coords,
+                    "reasons": dict(reason_counts)
+                    ##"focus-labels": focus_labels                
+                },
+                "source_media": args.in_video
             }
-        )
+        }
+        print(json.dumps(record), file = output_file)
+        
+        
 
         last_video_tag = None
         for j in idx.tolist():
@@ -488,6 +506,7 @@ def main():
             end_time = start_ms + round(1000 * float((1 + j - start_frame_idx)) / fps)
             if last_video_tag is not None:
                 if raw_reason[j] != last_video_tag["data"]["tag"]:
+                    print(json.dumps(last_video_tag), file = output_file)
                     last_video_tag = None
                 else:
                     last_video_tag["data"]["end_time"] = end_time
@@ -503,7 +522,6 @@ def main():
                     },
                     "source_media": args.in_video,
                 }
-                tags_doc.append(last_video_tag)
                                         
             ## this is not fps, but still better than every frame
             if j % 4 != 0: continue
@@ -518,7 +536,7 @@ def main():
                 x1 = round(float(x1) / float(W), 6)
                 y1 = round(float(y1) / float(H), 6)
                 
-                tags_doc.append({
+                record = {
                     "type": "tag",
                     "data": {
                         "tag": raw_reason[j],
@@ -536,10 +554,12 @@ def main():
                         }
                     },
                     "source_media": args.in_video,
-                })
-                                
+                }
+                print(json.dumps(record), file = output_file)
 
-    write_json(args.output_file, tags_doc)
+        if last_video_tag is not None:
+            print(json.dumps(last_video_tag), file = output_file)
+            last_video_tag = None
 
     print(f"?Wrote: {args.out_video}")
     print(f"?Wrote: {args.overlay_video}")
