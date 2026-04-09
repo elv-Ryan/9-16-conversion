@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
+
 import argparse
 import json
 import subprocess
@@ -11,6 +14,22 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
+from dataclasses import dataclass
+from typing import List, Optional
+from dacite import from_dict
+import setproctitle
+
+@dataclass
+class RuntimeConfig:
+    model: str = "models/mp_tasks/object_detector/efficientdet_lite0.tflite"
+    score_person: float = 0.35
+    score_ball: float = 0.25
+    sigma_frames: float = 24.0
+    max_dx: float = 3
+    action_hold_sec: float = 0.75
+    mode: str = "movie"
+    output_video: bool = False
+    output_overlay: bool = False
 
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
@@ -90,27 +109,30 @@ def focus_color_bgr(reason):
 
 
 def main():
+
+    params = get_params()
+
+    params = from_dict(RuntimeConfig, data=params)
+    
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_video", required=True)
     ap.add_argument("--shots_json", required=True)
     ap.add_argument("--out_video", default="/dev/null")
     ap.add_argument("--overlay_video", default=None)
-    ap.add_argument("--mode", choices=["sports", "movie"], default="sports")
+    ap.add_argument("--mode", default=None)
+    ap.add_argument("--params", default=None)
 
-    ap.add_argument("--model", default="models/mp_tasks/object_detector/efficientdet_lite0_int8_1.tflite")
+    ap.add_argument("--model", default=None)
     ap.add_argument("--crop_w", type=int, default=-1)
     ap.add_argument("--crop_h", type=int, default=720)
 
-    ap.add_argument("--score_person", type=float, default=0.35)
-    ap.add_argument("--score_ball", type=float, default=0.25)
-    ap.add_argument("--sigma_frames", type=float, default=24.0)
-    ap.add_argument("--max_dx", type=float, default=3.0)
-    ap.add_argument("--action_hold_sec", type=float, default=0.75)
-
-    ap.add_argument("--focus_json", default=None)
-    ap.add_argument("--x_json", default=None)
-    ap.add_argument("--tags_json", default=None)
-    ap.add_argument("--bbox_json", default=None)
+    ap.add_argument("--score_person", type=float, default=None)
+    ap.add_argument("--score_ball", type=float, default=None)
+    ap.add_argument("--sigma_frames", type=float, default=None)
+    ap.add_argument("--max_dx", type=float, default=None)
+    ap.add_argument("--action_hold_sec", type=float, default=None)
+    
+    ap.add_argument("--output_file", default="out.jsonl")
     args = ap.parse_args()
 
     out_video = Path(args.out_video)
@@ -126,14 +148,6 @@ def main():
 
     if args.overlay_video is None:
         args.overlay_video = str(out_video.with_suffix("")) + ".overlay.mp4"
-    if args.focus_json is None:
-        args.focus_json = str(out_video.with_suffix("")) + ".focus_per_shot.json"
-    if args.x_json is None:
-        args.x_json = str(out_video.with_suffix("")) + ".x_per_frame_per_shot.json"
-    if args.tags_json is None:
-        args.tags_json = str(out_video.with_suffix("")) + ".tags.json"
-    if args.bbox_json is None:
-        args.bbox_json = str(out_video.with_suffix("")) + ".bbox_per_frame_per_shot.json"
 
     shots_doc = json.load(open(args.shots_json))
     shots = shots_doc["tags"]
@@ -157,7 +171,7 @@ def main():
 
     BaseOptions = mp_python.BaseOptions
     base_options = mp_python.BaseOptions(
-        model_asset_path=args.model,
+        model_asset_path=params.model,
         delegate=mp_python.BaseOptions.Delegate.GPU
     )
 
@@ -166,9 +180,9 @@ def main():
     RunningMode = vision.RunningMode
 
     options = ObjectDetectorOptions(
-        base_options=base_options, ##BaseOptions(model_asset_path=args.model),
+        base_options=base_options,
         max_results=50,
-        score_threshold=min(args.score_ball, args.score_person),
+        score_threshold=min(params.score_ball, params.score_person),
         running_mode=RunningMode.VIDEO,
     )
     detector = ObjectDetector.create_from_options(options)
@@ -232,11 +246,11 @@ def main():
             area = float(bbox_area(bb))
             cx = float(bbox_center_x(bb))
 
-            if name == "sports ball" and score >= args.score_ball:
+            if name == "sports ball" and score >= params.score_ball:
                 cand = (score, area, cx, bb)
                 if (best_ball is None) or (score * area) > (best_ball[0] * best_ball[1]):
                     best_ball = cand
-            elif name == "person" and score >= args.score_person:
+            elif name == "person" and score >= params.score_person:
                 persons.append((score, area, cx, bb))
 
         motion_cx = motion_centroid(prev_gray, frame_gray)
@@ -250,7 +264,7 @@ def main():
         ball_present = False
         focus_bbox = None
 
-        if args.mode == "sports":
+        if params.mode == "sports":
             if best_ball is not None:
                 ball_present = True
                 ball_det_frames += 1
@@ -279,17 +293,17 @@ def main():
                     focus_bbox = best[3]
                     reason = "person_big"
 
-            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(args.action_hold_sec * fps)):
+            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
                 target_cx = last_action_cx
                 reason = "action"
 
-        elif args.mode == "movie":
+        elif params.mode == "movie":
             if persons:
                 best = max(persons, key=lambda p: p[1] * p[0])
                 target_cx = best[2]
                 focus_bbox = best[3]
                 reason = "person_big"
-            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(args.action_hold_sec * fps)):
+            elif last_action_cx is not None and (frame_idx - last_action_frame) <= int(round(params.action_hold_sec * fps)):
                 target_cx = last_action_cx
                 reason = "action"
 
@@ -324,8 +338,8 @@ def main():
         if len(idx) <= 2:
             continue
         xs = raw_x[idx]
-        xs = gaussian_smooth(xs, sigma=args.sigma_frames)
-        xs = vel_clamp_fb(xs, max_dx=args.max_dx)
+        xs = gaussian_smooth(xs, sigma=params.sigma_frames)
+        xs = vel_clamp_fb(xs, max_dx=params.max_dx)
         xs = np.clip(xs, 0, W - args.crop_w)
         smooth_x[idx] = xs
 
@@ -441,7 +455,7 @@ def main():
             focus_labels.append(raw_reason[j])
 
         #reasons = shot_reason_order.get(sid, [])
-        #tag_name = args.mode + "__" + "__".join(reasons) if reasons else args.mode + "__none"
+        #tag_name = params.mode + "__" + "__".join(reasons) if reasons else params.mode + "__none"
 
         reason_counts = shot_reason_counts.get(sid, Counter())
         tag_name = reason_counts.most_common(1)[0][0]
@@ -525,15 +539,12 @@ def main():
                 })
                                 
 
-    write_json(args.tags_json, tags_doc)
+    write_json(args.output_file, tags_doc)
 
-    print(f"Wrote: {args.out_video}")
-    print(f"Wrote: {args.overlay_video}")
-    print(f"Wrote: {args.focus_json}")
-    print(f"Wrote: {args.x_json}")
-    print(f"Wrote: {args.tags_json}")
-    print(f"Wrote: {args.bbox_json}")
-    print(f"input={W}x{H} fps={fps:.3f} frames={total_frames} shots={len(shots)} mode={args.mode}")
+    print(f"?Wrote: {args.out_video}")
+    print(f"?Wrote: {args.overlay_video}")
+    print(f"Wrote: {args.output_file}")
+    print(f"input={W}x{H} fps={fps:.3f} frames={total_frames} shots={len(shots)} mode={params.mode}")
     print(f"ball_det_frames={ball_det_frames} ball_inside_raw_pct={100.0 * ball_inside_raw / max(1, ball_det_frames):.1f}%")
     print(f"mean_abs_dx_raw={raw_dx:.3f} mean_abs_dx_smooth={sm_dx:.3f}")
 
