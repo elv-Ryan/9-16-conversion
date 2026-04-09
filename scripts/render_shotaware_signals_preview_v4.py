@@ -419,55 +419,7 @@ def main():
         shot_reason_counts[int(sid)][reason] += 1
         if not shot_reason_order[int(sid)] or shot_reason_order[int(sid)][-1] != reason:
             shot_reason_order[int(sid)].append(reason)
-
-        shot_focus_rows[int(sid)].append(
-            {
-                "frame_idx": i,
-                "t_sec": round(raw_t_sec[i], 3),
-                "reason": reason,
-                "target_cx": round(raw_target_cx[i], 3),
-                "raw_x": int(round(raw_x[i])),
-                "smooth_x": int(round(smooth_x[i])),
-            }
-        )
-
-        x_rows.append(
-            {
-                "frame_idx": i,
-                "t_sec": round(raw_t_sec[i], 3),
-                "shot_id": int(sid),
-                "raw_x": int(round(raw_x[i])),
-                "smooth_x": int(round(smooth_x[i])),
-                "reason": reason,
-            }
-        )
-
-    focus_doc = {
-        "version": "focus_per_shot.v1",
-        "mode": args.mode,
-        "video": args.in_video,
-        "shots_json": args.shots_json,
-        "model": args.model,
-        "crop_w": args.crop_w,
-        "crop_h": args.crop_h,
-        "shots": [],
-    }
-
-    for s in shots:
-        sid = int(s["shot_id"])
-        reason_counts = shot_reason_counts.get(sid, Counter())
-        dominant_focus = reason_counts.most_common(1)[0][0] if reason_counts else "none"
-        focus_doc["shots"].append(
-            {
-                "shot_id": sid,
-                "start_sec": s["start_time"],
-                "end_sec": s["end_time"],
-                "dominant_focus": dominant_focus,
-                "reason_counts": dict(reason_counts),
-                "focus_frames": shot_focus_rows.get(sid, []),
-            }
-        )
-
+    
     tags_doc = []
     for s in shots:
         sid = int(s["shot_id"])
@@ -516,8 +468,32 @@ def main():
             }
         )
 
+        last_video_tag = None
         for j in idx.tolist():
+            start_time = start_ms + round(1000 * float((j - start_frame_idx)) / fps)
+            end_time = start_ms + round(1000 * float((1 + j - start_frame_idx)) / fps)
+            if last_video_tag is not None:
+                if raw_reason[j] != last_video_tag["data"]["tag"]:
+                    last_video_tag = None
+                else:
+                    last_video_tag["data"]["end_time"] = end_time
+                    
+            if last_video_tag is None:
+                last_video_tag = {
+                    "type": "tag",
+                    "data": {
+                        "tag": raw_reason[j],
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "track": "focus",
+                    },
+                    "source_media": args.in_video,
+                }
+                tags_doc.append(last_video_tag)
+                                        
+            ## this is not fps, but still better than every frame
             if j % 4 != 0: continue
+
             bb = raw_focus_bbox[j]
             if bb is None:
                 bbox_norm = None
@@ -532,8 +508,8 @@ def main():
                     "type": "tag",
                     "data": {
                         "tag": raw_reason[j],
-                        "start_time": -2,
-                        "end_time": -1,
+                        "start_time": start_time,
+                        "end_time": end_time,
                         "track": "focus",
                         "frame_info": {
                             "frame_idx": j,
@@ -549,57 +525,7 @@ def main():
                 })
                                 
 
-    bbox_rows = []
-    for i, sid in enumerate(raw_shot.tolist()):
-        bb = raw_focus_bbox[i]
-        if bb is None:
-            bbox_px = None
-            bbox_norm = None
-        else:
-            x0, y0, x1, y1 = bb
-            bbox_px = [int(x0), int(y0), int(x1), int(y1)]
-            bbox_norm = [
-                round(float(x0) / float(W), 6),
-                round(float(y0) / float(H), 6),
-                round(float(x1) / float(W), 6),
-                round(float(y1) / float(H), 6),
-            ]
-
-        
-            
-        bbox_rows.append(
-            {
-                "frame_idx": i,
-                "t_sec": round(raw_t_sec[i], 3),
-                "shot_id": int(sid),
-                "focus": raw_reason[i],
-                "bbox_px": bbox_px,
-                "bbox_norm": bbox_norm,
-            }
-        )
-
-    bbox_doc = {
-        "version": "bbox_per_frame_per_shot.v1",
-        "mode": args.mode,
-        "video": args.in_video,
-        "shots_json": args.shots_json,
-        "frames": bbox_rows,
-    }
-
-    x_doc = {
-        "version": "x_per_frame_per_shot.v1",
-        "mode": args.mode,
-        "video": args.in_video,
-        "shots_json": args.shots_json,
-        "crop_w": args.crop_w,
-        "crop_h": args.crop_h,
-        "frames": x_rows,
-    }
-
-    write_json(args.focus_json, focus_doc)
-    write_json(args.x_json, x_doc)
     write_json(args.tags_json, tags_doc)
-    write_json(args.bbox_json, bbox_doc)
 
     print(f"Wrote: {args.out_video}")
     print(f"Wrote: {args.overlay_video}")
