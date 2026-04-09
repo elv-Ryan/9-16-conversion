@@ -156,12 +156,17 @@ def main():
         raise SystemExit(f"ERROR: crop_w {args.crop_w} > input_w {W}")
 
     BaseOptions = mp_python.BaseOptions
+    base_options = mp_python.BaseOptions(
+        model_asset_path=args.model,
+        delegate=mp_python.BaseOptions.Delegate.GPU
+    )
+
     ObjectDetector = vision.ObjectDetector
     ObjectDetectorOptions = vision.ObjectDetectorOptions
     RunningMode = vision.RunningMode
 
     options = ObjectDetectorOptions(
-        base_options=BaseOptions(model_asset_path=args.model),
+        base_options=base_options, ##BaseOptions(model_asset_path=args.model),
         max_results=50,
         score_threshold=min(args.score_ball, args.score_person),
         running_mode=RunningMode.VIDEO,
@@ -209,9 +214,11 @@ def main():
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        res = detector.detect_for_video(mp_image, ts_ms)
+        frame_resized = frame_rgb ##cv2.resize(frame_rgb, (320, 320))
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_resized)
 
+        ##print(f"DEBUG: Frame shape: {frame_resized.shape}, dtype: {frame_resized.dtype}, contiguous: {frame_resized.flags['C_CONTIGUOUS']}")
+        res = detector.detect_for_video(mp_image, ts_ms)
         best_ball = None
         persons = []
 
