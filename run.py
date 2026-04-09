@@ -218,9 +218,10 @@ def main():
 
     input_files = []
     
-    for input_filename in sys.stdin:
+    for input_filename in sys.stdin:        
         input_filename = input_filename.strip()
         print("reading " + input_filename)
+        if input_filename == "": continue
         
         cap = cv2.VideoCapture(input_filename)
         if not cap.isOpened():
