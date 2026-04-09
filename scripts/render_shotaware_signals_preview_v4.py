@@ -133,10 +133,10 @@ def main():
     shots_doc = json.load(open(args.shots_json))
     shots = shots_doc["tags"]
     shot_edges = [(float(s["start_time"]) / 1000 , float(s["end_time"] / 1000)) for s in shots]
-    
+  
     for i, shot in enumerate(shots):
       shot["shot_id"] = i
-    
+  
     cap = cv2.VideoCapture(args.in_video)
     if not cap.isOpened():
         raise SystemExit(f"ERROR: cannot open {args.in_video}")
@@ -320,80 +320,82 @@ def main():
     raw_dx = np.abs(np.diff(raw_x)).mean() if len(raw_x) > 1 else 0.0
     sm_dx = np.abs(np.diff(smooth_x)).mean() if len(smooth_x) > 1 else 0.0
 
-    ff = subprocess.Popen(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{args.crop_w}x{H}",
-            "-r", f"{fps}",
-            "-i", "-",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            args.out_video,
-        ],
-        stdin=subprocess.PIPE,
-    )
-    assert ff.stdin is not None
+    if False: ## render video
+      ff = subprocess.Popen(
+          [
+              "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+              "-f", "rawvideo",
+              "-pix_fmt", "bgr24",
+              "-s", f"{args.crop_w}x{H}",
+              "-r", f"{fps}",
+              "-i", "-",
+              "-c:v", "libx264",
+              "-pix_fmt", "yuv420p",
+              args.out_video,
+          ],
+          stdin=subprocess.PIPE,
+      )
+      assert ff.stdin is not None
 
-    cap2 = cv2.VideoCapture(args.in_video)
-    i = 0
-    while True:
-        ok, frame_bgr = cap2.read()
-        if not ok or i >= len(smooth_x):
-            break
-        x0 = int(round(float(smooth_x[i])))
-        crop = frame_bgr[:, x0:x0 + args.crop_w]
-        ff.stdin.write(crop.tobytes())
-        i += 1
-    cap2.release()
-    ff.stdin.close()
-    ff.wait()
+      cap2 = cv2.VideoCapture(args.in_video)
+      i = 0
+      while True:
+          ok, frame_bgr = cap2.read()
+          if not ok or i >= len(smooth_x):
+              break
+          x0 = int(round(float(smooth_x[i])))
+          crop = frame_bgr[:, x0:x0 + args.crop_w]
+          ff.stdin.write(crop.tobytes())
+          i += 1
+      cap2.release()
+      ff.stdin.close()
+      ff.wait()
 
-    ff2 = subprocess.Popen(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{W}x{H}",
-            "-r", f"{fps}",
-            "-i", "-",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            args.overlay_video,
-        ],
-        stdin=subprocess.PIPE,
-    )
-    assert ff2.stdin is not None
+    if False:
+      ff2 = subprocess.Popen(
+          [
+              "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+              "-f", "rawvideo",
+              "-pix_fmt", "bgr24",
+              "-s", f"{W}x{H}",
+              "-r", f"{fps}",
+              "-i", "-",
+              "-c:v", "libx264",
+              "-pix_fmt", "yuv420p",
+              args.overlay_video,
+          ],
+          stdin=subprocess.PIPE,
+      )
+      assert ff2.stdin is not None
 
-    cap3 = cv2.VideoCapture(args.in_video)
-    i = 0
-    while True:
-        ok, frame_bgr = cap3.read()
-        if not ok or i >= len(smooth_x):
-            break
+      cap3 = cv2.VideoCapture(args.in_video)
+      i = 0
+      while True:
+          ok, frame_bgr = cap3.read()
+          if not ok or i >= len(smooth_x):
+              break
 
-        reason = raw_reason[i]
-        color = focus_color_bgr(reason)
-        x0 = int(round(float(smooth_x[i])))
-        x1 = min(W - 1, x0 + args.crop_w - 1)
+          reason = raw_reason[i]
+          color = focus_color_bgr(reason)
+          x0 = int(round(float(smooth_x[i])))
+          x1 = min(W - 1, x0 + args.crop_w - 1)
 
-        cv2.rectangle(frame_bgr, (x0, 0), (x1, H - 1), (180, 180, 180), 2)
+          cv2.rectangle(frame_bgr, (x0, 0), (x1, H - 1), (180, 180, 180), 2)
 
-        bb = raw_focus_bbox[i]
-        if bb is not None:
-            cv2.rectangle(frame_bgr, (bb[0], bb[1]), (bb[2], bb[3]), color, 3)
+          bb = raw_focus_bbox[i]
+          if bb is not None:
+              cv2.rectangle(frame_bgr, (bb[0], bb[1]), (bb[2], bb[3]), color, 3)
 
-        label = f"{reason}  frame={i}  t={raw_t_sec[i]:.3f}s  shot={int(raw_shot[i])}"
-        cv2.rectangle(frame_bgr, (12, 12), (min(W - 12, 820), 56), (0, 0, 0), -1)
-        cv2.putText(frame_bgr, label, (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+          label = f"{reason}  frame={i}  t={raw_t_sec[i]:.3f}s  shot={int(raw_shot[i])}"
+          cv2.rectangle(frame_bgr, (12, 12), (min(W - 12, 820), 56), (0, 0, 0), -1)
+          cv2.putText(frame_bgr, label, (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
-        ff2.stdin.write(frame_bgr.tobytes())
-        i += 1
+          ff2.stdin.write(frame_bgr.tobytes())
+          i += 1
 
-    cap3.release()
-    ff2.stdin.close()
-    ff2.wait()
+      cap3.release()
+      ff2.stdin.close()
+      ff2.wait()
 
     shot_reason_counts = defaultdict(Counter)
     shot_reason_order = defaultdict(list)
