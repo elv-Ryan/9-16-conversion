@@ -93,7 +93,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_video", required=True)
     ap.add_argument("--shots_json", required=True)
-    ap.add_argument("--out_video", required=True)
+    ap.add_argument("--out_video", default="/dev/null")
     ap.add_argument("--overlay_video", default=None)
     ap.add_argument("--mode", choices=["sports", "movie"], default="sports")
 
@@ -480,6 +480,7 @@ def main():
         start_frame_idx = int(idx[0])
 
         x_coords = []
+
         focus_labels = []
         for j in idx.tolist():
             center_x_norm = float((smooth_x[j] + (args.crop_w / 2.0)) / float(W))
@@ -487,9 +488,12 @@ def main():
             x_coords.append(round(center_x_norm, 6))
             focus_labels.append(raw_reason[j])
 
-        reasons = shot_reason_order.get(sid, [])
-        tag_name = args.mode + "__" + "__".join(reasons) if reasons else args.mode + "__none"
+        #reasons = shot_reason_order.get(sid, [])
+        #tag_name = args.mode + "__" + "__".join(reasons) if reasons else args.mode + "__none"
 
+        reason_counts = shot_reason_counts.get(sid, Counter())
+        tag_name = reason_counts.most_common(1)[0][0]
+        
         tags_doc.append(
             {
                 "type": "tag",
@@ -503,12 +507,47 @@ def main():
                     },
                     "additional_info": {
                         "x-coordinates": x_coords,
-                        "focus-labels": focus_labels
+                        "reasons": dict(reason_counts)
+                        ##"focus-labels": focus_labels
+                        
                     },
                     "source_media": args.in_video
                 }
             }
         )
+
+        for j in idx.tolist():
+            if j % 4 != 0: continue
+            bb = raw_focus_bbox[j]
+            if bb is None:
+                bbox_norm = None
+            else:
+                x0, y0, x1, y1 = bb
+                x0 = round(float(x0) / float(W), 6)
+                y0 = round(float(y0) / float(H), 6)
+                x1 = round(float(x1) / float(W), 6)
+                y1 = round(float(y1) / float(H), 6)
+                
+                tags_doc.append({
+                    "type": "tag",
+                    "data": {
+                        "tag": raw_reason[j],
+                        "start_time": -2,
+                        "end_time": -1,
+                        "track": "focus",
+                        "frame_info": {
+                            "frame_idx": j,
+                            "box": {
+                                "x0": x0,
+                                "y0": y0,
+                                "x1": x1,
+                                "y1": y1,
+                            }
+                        }
+                    },
+                    "source_media": args.in_video,
+                })
+                                
 
     bbox_rows = []
     for i, sid in enumerate(raw_shot.tolist()):
@@ -526,6 +565,8 @@ def main():
                 round(float(y1) / float(H), 6),
             ]
 
+        
+            
         bbox_rows.append(
             {
                 "frame_idx": i,
