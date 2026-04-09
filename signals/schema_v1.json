@@ -1,0 +1,18 @@
+{
+  "version": "signals.v1",
+  "description": "Common signal output for per-shot multi-signal reframing (regions + scores + timestamps).",
+  "region": {
+    "t_sec": "float; timestamp in seconds (video timebase)",
+    "shot_id": "int; shot policy unit",
+    "signal": "string; e.g. face|person|ball|text",
+    "score": "float 0..1",
+    "bbox_norm": "list[4] [x_min, y_min, x_max, y_max] normalized to [0,1]",
+    "tags": "dict; optional extra attrs (class_name, model, etc.)"
+  },
+  "output": {
+    "video": "string path",
+    "shots_json": "string path",
+    "frames_index_json": "string path",
+    "signals": "dict of {signal_name: {model_id, regions[]}}"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "director.policy.v1",
+  "policy_fields": [
+    "shot_id","t_start_sec","t_end_sec",
+    "content_type","prioritized_signals","crop_params","hard_constraints","rationale"
+  ]
+}
