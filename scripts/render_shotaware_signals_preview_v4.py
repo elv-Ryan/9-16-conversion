@@ -3,6 +3,7 @@
 from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
 import sys
+import os
 import argparse
 import json
 import subprocess
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from dacite import from_dict
 import setproctitle
+import requests
 
 @dataclass
 class RuntimeConfig:
@@ -32,6 +34,28 @@ class RuntimeConfig:
     output_video: bool = False
     output_overlay: bool = False
 
+
+
+def get_shot_detection_tags(iq, token):
+    url = f"https://ai.contentfabric.io/tagstore/{iq}/tags"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+    
+    params = {
+        "track": "shot_detection"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)        
+        response.raise_for_status()        
+        return response.json()    
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching tags: {e}")
+        return None
+    
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
@@ -117,24 +141,23 @@ def main():
     
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_video", required=True)
-    ap.add_argument("--shots_json", required=True)
     ap.add_argument("--out_video", default="/dev/null")
     ap.add_argument("--overlay_video", default=None)
+    
     ap.add_argument("--mode", default=None)
     ap.add_argument("--params", default=None)
 
     ap.add_argument("--model", default=None)
-
     ap.add_argument("--score_person", type=float, default=None)
     ap.add_argument("--score_ball", type=float, default=None)
     ap.add_argument("--sigma_frames", type=float, default=None)
     ap.add_argument("--max_dx", type=float, default=None)
     ap.add_argument("--action_hold_sec", type=float, default=None)
     
-    ap.add_argument("--output-file", default="out.jsonl")
+    ap.add_argument("--output-path", default="out.jsonl")
     args = ap.parse_args()
 
-    output_file = open(args.output_file, "w")
+    output_file = open(args.output_path, "w")
 
     ### xxx add unhandled exception handler
     
@@ -144,8 +167,10 @@ def main():
     if args.overlay_video is None:
         args.overlay_video = str(out_video.with_suffix("")) + ".overlay.mp4"
 
-    shots_doc = json.load(open(args.shots_json))
+    shots_doc = get_shot_detection_tags(os.environ["ELV_CONTENT"], os.environ["ELV_TOKEN"])
     shots = shots_doc["tags"]
+    print(f"loaded {len(shots)} tags from tagstore")
+    
     shot_edges = [(float(s["start_time"]) / 1000 , float(s["end_time"] / 1000)) for s in shots]
   
     for i, shot in enumerate(shots):
@@ -191,6 +216,7 @@ def main():
 
     fps = None
 
+    input_files = []
     
     for input_filename in sys.stdin:
         input_filename = input_filename.strip()
@@ -199,7 +225,9 @@ def main():
         cap = cv2.VideoCapture(input_filename)
         if not cap.isOpened():
             raise SystemExit(f"ERROR: cannot open {input_filename}")
-    
+
+        input_files.append(input_filename)
+        
         if fps is None:
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps is None:
@@ -382,7 +410,7 @@ def main():
       )
       assert ff.stdin is not None
 
-      cap2 = cv2.VideoCapture(args.in_video)
+      cap2 = cv2.VideoCapture("TODO NEED ALL VIDEOS, SHOULD KEEP")
       i = 0
       while True:
           ok, frame_bgr = cap2.read()
@@ -413,7 +441,7 @@ def main():
       )
       assert ff2.stdin is not None
 
-      cap3 = cv2.VideoCapture(args.in_video)
+      cap3 = cv2.VideoCapture("SHOULD KEEP TRACK OF INPUT FILES")
       i = 0
       while True:
           ok, frame_bgr = cap3.read()
@@ -493,7 +521,7 @@ def main():
                     "reasons": dict(reason_counts)
                     ##"focus-labels": focus_labels                
                 },
-                "source_media": args.in_video
+                "source_media": input_files[0]
             }
         }
         print(json.dumps(record), file = output_file)
@@ -520,7 +548,7 @@ def main():
                         "end_time": end_time,
                         "track": "focus",
                     },
-                    "source_media": args.in_video,
+                    "source_media": input_files[0]
                 }
                                         
             ## this is not fps, but still better than every frame
@@ -553,7 +581,7 @@ def main():
                             }
                         }
                     },
-                    "source_media": args.in_video,
+                    "source_media": input_files[0]
                 }
                 print(json.dumps(record), file = output_file)
 
@@ -563,7 +591,7 @@ def main():
 
     print(f"?Wrote: {args.out_video}")
     print(f"?Wrote: {args.overlay_video}")
-    print(f"Wrote: {args.output_file}")
+    print(f"Wrote: {args.output_path}")
     print(f"input={W}x{H} fps={fps:.3f} frames={total_frames} shots={len(shots)} mode={params.mode}")
     print(f"ball_det_frames={ball_det_frames} ball_inside_raw_pct={100.0 * ball_inside_raw / max(1, ball_det_frames):.1f}%")
     print(f"mean_abs_dx_raw={raw_dx:.3f} mean_abs_dx_smooth={sm_dx:.3f}")
