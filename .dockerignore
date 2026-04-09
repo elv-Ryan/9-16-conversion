@@ -7,3 +7,6 @@ vendor/mediapipe/bazel/**
 !models/**
 !unbazelify/**
 !container/**
+!requirements.txt
+!run.py
+

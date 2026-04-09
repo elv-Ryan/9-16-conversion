@@ -24,7 +24,7 @@ import requests
 
 @dataclass
 class RuntimeConfig:
-    model: str = "models/mp_tasks/object_detector/efficientdet_lite0.tflite"
+    model: str = "/elv/models/mp_tasks/object_detector/efficientdet_lite0.tflite"
     score_person: float = 0.35
     score_ball: float = 0.25
     sigma_frames: float = 24.0
@@ -140,7 +140,7 @@ def main():
     params = from_dict(RuntimeConfig, data=params)
     
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_video", required=True)
+    ap.add_argument("--in_video", required=False)
     ap.add_argument("--out_video", default="/dev/null")
     ap.add_argument("--overlay_video", default=None)
     

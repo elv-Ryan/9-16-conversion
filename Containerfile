@@ -1,4 +1,15 @@
-FROM ubuntu:22.04 AS commonbase
+FROM continuumio/miniconda3:latest
+WORKDIR /elv
+
+RUN --mount=type=cache,target=/opt/conda/pkgs \
+    conda create -n mlpod python=3.12 -y
+
+## blah, everything in the UNIVERSE needs ffmpeg
+RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt/archives,sharing=locked \
+    apt-get update && apt-get install -y ffmpeg
+
+ENV PATH="/opt/conda/envs/mlpod/bin:$PATH"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -17,8 +28,6 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked,id=ubu22-aptlist
     python3-pip \
     unzip \
     zip \
-    openjdk-17-jdk \
-    clang \
     lld \
     libopencv-dev \
     libglib2.0-0 \
@@ -26,74 +35,30 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked,id=ubu22-aptlist
     libxext6 \
     libxrender1 
 
+# Create the SSH directory and set correct permissions
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
-FROM commonbase AS builder
+# Add GitHub to known_hosts to bypass host verification
+RUN ssh-keyscan -t rsa github.com >> /root/.ssh/known_hosts
 
-# Bazelisk (correct binary for container arch)
-RUN --mount=type=cache,target=/cache/bazel-dl,id=bazel-dl \
-    arch="$(dpkg --print-architecture)" && \
-    case "$arch" in \
-      amd64)  url="https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64" ;; \
-      arm64)  url="https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-arm64" ;; \
-      *) echo "Unsupported arch: $arch" && exit 1 ;; \
-    esac && \
-    wget -O /cache/bazel-dl/bazel "$url" && cp /cache/bazel-dl/bazel /usr/local/bin && chmod +x /usr/local/bin/bazel
+ARG SSH_AUTH_SOCK
+ENV SSH_AUTH_SOCK ${SSH_AUTH_SOCK}
 
-WORKDIR /work/vendor/mediapipe
+COPY requirements.txt .
 
-COPY graphs /work/graphs
-COPY models /work/models
-COPY vendor /work/vendor
+RUN --mount=type=ssh \
+    --mount=type=cache,target=/root/.cache/pip \
+    /opt/conda/envs/mlpod/bin/pip install -r requirements.txt 
 
-ENV CC=clang
-ENV CXX=clang++
-ENV USE_BAZEL_VERSION=7.4.1
-
-# Build CPU-only AutoFlip runner (explicit OpenCV4 include path)
-#RUN --mount=type=cache,target=/root/.cache/bazelisk,id=bazel741 \
-#    --mount=type=cache,target=/root/bazelbuild,id=bazelbuild \
-#    bazel help build
-
-RUN --mount=type=cache,target=/root/.cache/bazelisk,id=bazel741 \
-    --mount=type=cache,target=/root/.cache/bazel,id=bazelbuild \
-    bazel build --disk_cache=/root/.cache/bazel/WHEE -c opt \
-        --define MEDIAPIPE_DISABLE_GPU=1 \
-        --repo_env=CC=clang --repo_env=CXX=clang++ \
-        --action_env=CC=clang --action_env=CXX=clang++ \
-        --copt=-I/usr/include/opencv4 --cxxopt=-I/usr/include/opencv4 \
-        --copt="-march=native" --define xnn_enable_avxvnni=false --define xnn_enable_avxvnniint8=false \
-        mediapipe/examples/desktop/autoflip:run_autoflip
-
-RUN mkdir /unbazelify
-COPY unbazelify/copy_rundir.bash /unbazelify
-
-RUN --mount=type=cache,target=/root/.cache/bazelisk,id=bazel741 \
-    --mount=type=cache,target=/root/.cache/bazel,id=bazelbuild \
-    /unbazelify/copy_rundir.bash
-
-##ENTRYPOINT ["tail", "-n", "+1", "find_output.txt", "binary_location.txt" ]
-
-
-
-FROM commonbase AS target
-
-COPY --from=builder /runfiles /runfiles
-
-COPY graphs /work/graphs
-COPY models /work/models
-COPY vendor /work/vendor
-
-WORKDIR /work
-
-RUN ln -s /dev/null /null.mp4
-
-COPY container/run_tagger.py /app/run_tagger.py
-
-RUN chmod +x /app/run_tagger.py
-RUN ls -l /app
-
-RUN mkdir -p /elv
 WORKDIR /elv
 
-ENTRYPOINT ["python3", "/app/run_tagger.py"]
+COPY models ./models
+RUN mkdir -p /app
 
+RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked,id=ubu22-aptlists \
+    --mount=type=cache,target=/var/cache/apt/archives,sharing=locked,id=ubu22-aptarchives \
+    apt-get update && apt-get install -y --no-install-recommends libgles2
+
+COPY run.py /app
+
+ENTRYPOINT ["/opt/conda/envs/mlpod/bin/python", "/app/run.py"]
