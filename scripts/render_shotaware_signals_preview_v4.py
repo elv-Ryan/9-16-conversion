@@ -131,9 +131,12 @@ def main():
         args.bbox_json = str(out_video.with_suffix("")) + ".bbox_per_frame_per_shot.json"
 
     shots_doc = json.load(open(args.shots_json))
-    shots = shots_doc["shots"]
-    shot_edges = [(float(s["start_sec"]), float(s["end_sec"])) for s in shots]
-
+    shots = shots_doc["tags"]
+    shot_edges = [(float(s["start_time"]) / 1000 , float(s["end_time"] / 1000)) for s in shots]
+    
+    for i, shot in enumerate(shots):
+      shot["shot_id"] = i
+    
     cap = cv2.VideoCapture(args.in_video)
     if not cap.isOpened():
         raise SystemExit(f"ERROR: cannot open {args.in_video}")
@@ -443,8 +446,8 @@ def main():
         focus_doc["shots"].append(
             {
                 "shot_id": sid,
-                "start_sec": float(s["start_sec"]),
-                "end_sec": float(s["end_sec"]),
+                "start_sec": s["start_time"],
+                "end_sec": s["end_time"],
                 "dominant_focus": dominant_focus,
                 "reason_counts": dict(reason_counts),
                 "focus_frames": shot_focus_rows.get(sid, []),
@@ -458,8 +461,8 @@ def main():
         if len(idx) == 0:
             continue
 
-        start_ms = int(round(float(s["start_sec"]) * 1000.0))
-        end_ms = int(round(float(s["end_sec"]) * 1000.0))
+        start_ms = s["start_time"]
+        end_ms = s["end_time"]
         start_frame_idx = int(idx[0])
 
         x_coords = []
