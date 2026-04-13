@@ -45,7 +45,8 @@ def get_shot_detection_tags(iq, token):
     }
     
     params = {
-        "track": "shot_detection"
+        "track": "shot_detection",
+        "limit": 5000
     }
     
     try:
