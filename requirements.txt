@@ -1,0 +1,6 @@
+mediapipe
+dacite
+setproctitle
+loguru
+common_ml @ git+https://github.com/eluv-io/common-ml.git#egg=common_ml
+requests
