@@ -21,6 +21,7 @@ from typing import List, Optional
 from dacite import from_dict
 import setproctitle
 import requests
+from loguru import logger
 
 @dataclass
 class RuntimeConfig:
@@ -219,9 +220,9 @@ def main():
 
     input_files = []
     
-    for input_filename in sys.stdin:        
+    for i, input_filename in enumerate(sys.stdin):        
         input_filename = input_filename.strip()
-        print("reading " + input_filename)
+        logger.info(f"[{i}] reading " + input_filename)
         if input_filename == "": continue
         
         cap = cv2.VideoCapture(input_filename)
@@ -371,9 +372,6 @@ def main():
             total_frames += 1
 
         cap.release()
-
-        ## this is a lie but we want to report some progress
-        print(json.dumps({"type": "progress", "data" : { "source_media": input_filename }}) + "\n", file=output_file)
 
     detector.close()
 
@@ -554,7 +552,7 @@ def main():
                 }
                                         
             ## this is not fps, but still better than every frame
-            if j % 4 != 0: continue
+            if j % 16 != 0: continue
 
             bb = raw_focus_bbox[j]
             if bb is None:
@@ -590,6 +588,9 @@ def main():
         if last_video_tag is not None:
             print(json.dumps(last_video_tag), file = output_file)
             last_video_tag = None
+
+    for fname in input_files:
+        print(json.dumps({"type": "progress", "data" : { "source_media": fname }}) + "\n", file=output_file)
 
     print(f"?Wrote: {args.out_video}")
     print(f"?Wrote: {args.overlay_video}")

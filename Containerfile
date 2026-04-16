@@ -61,4 +61,4 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked,id=ubu22-aptlist
 
 COPY run.py /app
 
-ENTRYPOINT ["/opt/conda/envs/mlpod/bin/python", "/app/run.py"]
+ENTRYPOINT ["/opt/conda/envs/mlpod/bin/python", "-u", "/app/run.py"]
