@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 
 from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
@@ -552,7 +553,7 @@ def main():
                 }
                                         
             ## this is not fps, but still better than every frame
-            if j % 16 != 0: continue
+            if j % 4 != 0: continue
 
             bb = raw_focus_bbox[j]
             if bb is None:
@@ -584,6 +585,9 @@ def main():
                     },
                 }
                 print(json.dumps(record), file = output_file)
+
+        # buffering the output slightly to not dump so much at once
+        time.sleep(0.5)
 
         if last_video_tag is not None:
             print(json.dumps(last_video_tag), file = output_file)
