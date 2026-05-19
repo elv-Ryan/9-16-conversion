@@ -220,6 +220,7 @@ def main():
     fps = None
 
     input_files = []
+    bad_fps = 0
     
     for i, input_filename in enumerate(sys.stdin):        
         input_filename = input_filename.strip()
@@ -237,8 +238,10 @@ def main():
             if fps is None:
                 raise Exception("could not determine framerate")
 
-        if fps != cap.get(cv2.CAP_PROP_FPS):
-            raise Exception("Variable FPS, panic")
+        this_fps = cap.get(cv2.CAP_PROP_FPS)
+        if this_fps != fps:
+            logger.warning(f"part {input_filename} has fps not the same as first part fps: {this_fps} != {fps}")
+            bad_fps = bad_fps + 1
         
         W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -375,6 +378,8 @@ def main():
         cap.release()
 
     detector.close()
+
+    logger.warning(f"Total BAD FPS parts detected: {bad_fps}")
 
     raw_x = np.asarray(raw_x, dtype=np.float32)
     raw_shot = np.asarray(raw_shot, dtype=np.int32)
