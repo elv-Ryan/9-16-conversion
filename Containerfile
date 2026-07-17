@@ -12,7 +12,9 @@ RUN apt-get update \
        ffmpeg \
        git \
        openssh-client \
+       libegl1 \
        libgl1 \
+       libgles2 \
        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
