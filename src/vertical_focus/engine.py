@@ -25,6 +25,7 @@ class VerticalFocusEngine:
         mode: str,
         policy_config: Dict,
         object_model: str,
+        face_model: str,
         delegate: str,
         shots: TagStoreShots,
         progress_log_interval_seconds: float,
@@ -36,6 +37,7 @@ class VerticalFocusEngine:
         self.progress_log_interval_s = max(0.25, float(progress_log_interval_seconds))
         self.detector = detector or MediaPipeFocusDetector(
             model_path=object_model,
+            face_model_path=face_model,
             delegate=delegate,
             config=policy_config,
         )
@@ -43,14 +45,20 @@ class VerticalFocusEngine:
         self.tracker = TrackManager(
             max_missed_updates=int(tracking.get("max_missed_updates", 4)),
             match_center_distance=float(tracking.get("match_center_distance", 0.18)),
+            ball_match_center_distance=float(tracking.get("ball_match_center_distance", 0.28)),
             min_iou=float(tracking.get("min_iou", 0.03)),
             box_alpha=float(tracking.get("box_alpha", 0.68)),
+            ball_box_alpha=float(tracking.get("ball_box_alpha", 0.90)),
+            prediction_max_frames=int(tracking.get("prediction_max_frames", 10)),
+            ball_prediction_max_frames=int(tracking.get("ball_prediction_max_frames", 22)),
+            prediction_max_distance=float(tracking.get("prediction_max_distance", 0.10)),
         )
         self.policy = FocusPolicy(mode, policy_config)
         self.motion = MotionEstimator()
         self.smoother: Optional[SmoothCamera] = None
         self.active_shot_id: Optional[str] = None
         self.last_global_time_ms: Optional[int] = None
+        self.last_selected_key: Optional[str] = None
         self.next_detection_global_ms = -1
         self.file_sequence = 0
         self.global_frame_idx = 0
@@ -66,9 +74,19 @@ class VerticalFocusEngine:
             deadband=float(temporal.get("deadband", 0.006)),
             max_speed_per_s=float(temporal.get("max_speed_normalized_per_second", 0.25)),
             max_accel_per_s2=float(temporal.get("max_acceleration_normalized_per_second2", 0.75)),
+            fast_response_time_s=float(temporal.get("fast_response_time_seconds", 0.16)),
+            fast_max_speed_per_s=float(
+                temporal.get("fast_max_speed_normalized_per_second", 0.55)
+            ),
+            fast_max_accel_per_s2=float(
+                temporal.get("fast_max_acceleration_normalized_per_second2", 2.0)
+            ),
+            fast_error_threshold=float(temporal.get("fast_error_threshold", 0.07)),
+            fast_boost_s=float(temporal.get("fast_boost_seconds", 0.30)),
         )
         self.active_shot_id = shot_id
         self.last_global_time_ms = None
+        self.last_selected_key = None
 
     def process_file(self, source_media: str, content_offset_ms: int) -> FileProcessResult:
         reader = VideoReader(source_media)
@@ -117,15 +135,10 @@ class VerticalFocusEngine:
                 if tagstore_shot is not None:
                     shot_id = f"tagstore:{tagstore_shot.shot_id}"
                     start_hint_ms = max(0, tagstore_shot.start_ms - content_offset_ms)
-                    end_hint_ms = min(
-                        info.duration_ms if info.duration_ms > 0 else 2**31 - 1,
-                        tagstore_shot.end_ms - content_offset_ms,
-                    )
                 else:
                     local_cut = local_shots.update(frame.rgb, frame.frame_idx)
                     shot_id = f"local:{self.file_sequence}:{local_shots.shot_index}"
                     start_hint_ms = frame.time_ms if local_cut or current_shot_id is None else current_start_hint_ms
-                    end_hint_ms = 0
 
                 if current_shot_id is None:
                     current_shot_id = shot_id
@@ -163,15 +176,25 @@ class VerticalFocusEngine:
                     time_s=global_time_ms / 1000.0,
                 )
                 assert self.smoother is not None
-                if not current_decisions and self.active_shot_id == current_shot_id and not self.smoother.initialized:
+                if not current_decisions and not self.smoother.initialized:
                     x_center = self.smoother.reset(selected.center_x)
                 else:
                     if self.last_global_time_ms is None:
                         dt_s = 1.0 / info.fps
                     else:
                         dt_s = max(1.0 / 240.0, (global_time_ms - self.last_global_time_ms) / 1000.0)
-                    x_center = self.smoother.update(selected.center_x, dt_s)
+                    focus_changed = (
+                        self.last_selected_key is not None
+                        and selected.key != self.last_selected_key
+                        and selected.label != "safe_center"
+                    )
+                    x_center = self.smoother.update(
+                        selected.center_x,
+                        dt_s,
+                        urgent=focus_changed,
+                    )
                 self.last_global_time_ms = global_time_ms
+                self.last_selected_key = selected.key
                 current_decisions.append(
                     FrameDecision(
                         frame_idx=frame.frame_idx,
@@ -188,20 +211,24 @@ class VerticalFocusEngine:
                     if info.duration_ms > 0:
                         percent = min(100.0, 100.0 * frame.time_ms / info.duration_ms)
                         logger.info(
-                            "focus progress source={} frame={} time_ms={} percent={:.1f} shot={}",
+                            "focus progress source={} frame={} time_ms={} percent={:.1f} shot={} label={} x={:.4f}",
                             source_media,
                             frame.frame_idx,
                             frame.time_ms,
                             percent,
                             current_shot_id,
+                            selected.label,
+                            x_center,
                         )
                     else:
                         logger.info(
-                            "focus progress source={} frame={} time_ms={} shot={}",
+                            "focus progress source={} frame={} time_ms={} shot={} label={} x={:.4f}",
                             source_media,
                             frame.frame_idx,
                             frame.time_ms,
                             current_shot_id,
+                            selected.label,
+                            x_center,
                         )
         finally:
             effective_duration_ms = reader.effective_duration_ms
@@ -210,7 +237,10 @@ class VerticalFocusEngine:
         if current_decisions:
             final_end = effective_duration_ms
             if current_shot_range is not None:
-                final_end = min(final_end, max(current_start_hint_ms + 1, current_shot_range.end_ms - content_offset_ms))
+                final_end = min(
+                    final_end,
+                    max(current_start_hint_ms + 1, current_shot_range.end_ms - content_offset_ms),
+                )
             finalize(final_end)
 
         self.file_sequence += 1

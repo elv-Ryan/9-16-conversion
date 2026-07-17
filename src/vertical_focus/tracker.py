@@ -32,13 +32,23 @@ class TrackManager:
         *,
         max_missed_updates: int = 4,
         match_center_distance: float = 0.18,
+        ball_match_center_distance: float = 0.28,
         min_iou: float = 0.03,
         box_alpha: float = 0.68,
+        ball_box_alpha: float = 0.90,
+        prediction_max_frames: int = 10,
+        ball_prediction_max_frames: int = 22,
+        prediction_max_distance: float = 0.10,
     ) -> None:
         self.max_missed_updates = int(max_missed_updates)
         self.match_center_distance = float(match_center_distance)
+        self.ball_match_center_distance = float(ball_match_center_distance)
         self.min_iou = float(min_iou)
         self.box_alpha = float(box_alpha)
+        self.ball_box_alpha = float(ball_box_alpha)
+        self.prediction_max_frames = max(0, int(prediction_max_frames))
+        self.ball_prediction_max_frames = max(0, int(ball_prediction_max_frames))
+        self.prediction_max_distance = max(0.0, float(prediction_max_distance))
         self._next_id = 1
         self._tracks: Dict[int, _Track] = {}
 
@@ -50,7 +60,6 @@ class TrackManager:
         unmatched_tracks = set(self._tracks)
         matched_detection_indices = set()
 
-        # Globally sort candidate pairs so association is deterministic.
         pairs: List[tuple[float, int, int]] = []
         for det_idx, detection in enumerate(detections):
             for track_id, track in self._tracks.items():
@@ -58,9 +67,13 @@ class TrackManager:
                     continue
                 overlap = iou(track.box, detection.box)
                 distance = center_distance(track.box, detection.box)
-                if overlap < self.min_iou and distance > self.match_center_distance:
+                distance_limit = (
+                    self.ball_match_center_distance if track.label == "ball" else self.match_center_distance
+                )
+                if overlap < self.min_iou and distance > distance_limit:
                     continue
-                cost = (1.0 - overlap) + 1.5 * distance
+                distance_weight = 0.95 if track.label == "ball" else 1.5
+                cost = (1.0 - overlap) + distance_weight * distance
                 pairs.append((cost, track_id, det_idx))
 
         for _, track_id, det_idx in sorted(pairs):
@@ -71,17 +84,17 @@ class TrackManager:
             old_cx, old_cy = box_center(track.box)
             new_cx, new_cy = box_center(detection.box)
             frame_delta = max(1, frame_idx - track.last_detection_frame)
-            alpha = self.box_alpha
+            alpha = self.ball_box_alpha if track.label == "ball" else self.box_alpha
             blended = sanitize_box(
-                tuple(
-                    alpha * new + (1.0 - alpha) * old
-                    for new, old in zip(detection.box, track.box)
-                )  # type: ignore[arg-type]
+                tuple(alpha * new + (1.0 - alpha) * old for new, old in zip(detection.box, track.box))  # type: ignore[arg-type]
             )
-            track.vx_per_frame = (new_cx - old_cx) / frame_delta
-            track.vy_per_frame = (new_cy - old_cy) / frame_delta
+            measured_vx = (new_cx - old_cx) / frame_delta
+            measured_vy = (new_cy - old_cy) / frame_delta
+            velocity_alpha = 0.78 if track.label == "ball" else 0.58
+            track.vx_per_frame = velocity_alpha * measured_vx + (1.0 - velocity_alpha) * track.vx_per_frame
+            track.vy_per_frame = velocity_alpha * measured_vy + (1.0 - velocity_alpha) * track.vy_per_frame
             track.box = blended
-            track.score = 0.7 * float(detection.score) + 0.3 * track.score
+            track.score = 0.75 * float(detection.score) + 0.25 * track.score
             track.hits += 1
             track.misses = 0
             track.last_detection_frame = frame_idx
@@ -91,7 +104,7 @@ class TrackManager:
         for track_id in unmatched_tracks:
             track = self._tracks[track_id]
             track.misses += 1
-            track.score *= 0.90
+            track.score *= 0.92 if track.label == "ball" else 0.88
 
         for det_idx, detection in enumerate(detections):
             if det_idx in matched_detection_indices:
@@ -121,8 +134,18 @@ class TrackManager:
             delta = max(0, frame_idx - track.last_detection_frame)
             if delta:
                 x1, y1, x2, y2 = track.box
-                dx = clamp(track.vx_per_frame * delta, -0.08, 0.08)
-                dy = clamp(track.vy_per_frame * delta, -0.08, 0.08)
+                horizon = self.ball_prediction_max_frames if track.label == "ball" else self.prediction_max_frames
+                prediction_delta = min(delta, horizon)
+                dx = clamp(
+                    track.vx_per_frame * prediction_delta,
+                    -self.prediction_max_distance,
+                    self.prediction_max_distance,
+                )
+                dy = clamp(
+                    track.vy_per_frame * prediction_delta,
+                    -self.prediction_max_distance,
+                    self.prediction_max_distance,
+                )
                 width = x2 - x1
                 height = y2 - y1
                 px1 = clamp(x1 + dx, 0.0, 1.0 - width)
@@ -134,7 +157,7 @@ class TrackManager:
                 TrackView(
                     track_id=track.track_id,
                     label=track.label,
-                    score=max(0.0, min(1.0, track.score * (0.97**delta))),
+                    score=max(0.0, min(1.0, track.score * (0.975**delta))),
                     box=box,
                     hits=track.hits,
                     misses=track.misses,

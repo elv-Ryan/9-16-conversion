@@ -1,71 +1,114 @@
-version: 2
-schema_version: vertical_focus_policy_v2
+version: 3
+schema_version: vertical_focus_policy_v3
 
 policies:
   sports:
     detection:
-      detection_fps: 8.0
-      person_min_score: 0.35
-      ball_min_score: 0.25
-      face_min_score: 0.50
-      max_results: 50
+      detection_fps: 12.0
+      person_min_score: 0.34
+      ball_min_score: 0.20
+      face_min_score: 0.45
+      face_min_suppression: 0.30
+      face_min_size_fraction: 0.035
+      max_results: 60
     tracking:
-      max_missed_updates: 4
+      max_missed_updates: 5
       match_center_distance: 0.18
-      min_iou: 0.03
-      box_alpha: 0.68
+      ball_match_center_distance: 0.28
+      min_iou: 0.02
+      box_alpha: 0.70
+      ball_box_alpha: 0.90
+      prediction_max_frames: 10
+      ball_prediction_max_frames: 22
+      prediction_max_distance: 0.10
     selection:
       min_track_hits: 2
       min_person_area: 0.0025
-      direct_ball_min_area: 0.0040
-      ball_player_radius: 0.22
-      min_ball_player_score: 0.48
+      ball_min_track_hits: 1
+      ball_max_misses: 2
+      ball_min_area: 0.00001
+      ball_max_area: 0.030
+      ball_context_radius: 0.34
+      ball_stable_hits_without_context: 3
+      ball_focus_weight: 0.82
+      ball_priority_score: 0.82
+      ball_player_radius: 0.28
+      min_ball_player_score: 0.35
       group_radius: 0.24
       max_group_size: 3
       announcer_face_min_area: 0.025
-      min_motion_score: 0.08
+      min_motion_score: 0.14
+      motion_only_without_subjects: true
       crowd_min_people: 4
       crowd_max_median_area: 0.015
-      crowd_max_motion_score: 0.20
-      crowd_group_score: 0.42
+      crowd_max_motion_score: 0.18
+      crowd_group_score: 0.36
     temporal:
-      min_hold_seconds: 0.55
-      lost_hold_seconds: 0.40
-      switch_margin: 0.13
-      deadband: 0.006
-      response_time_seconds: 0.30
+      min_hold_seconds: 0.42
+      lost_hold_seconds: 0.32
+      switch_margin: 0.10
+      hold_last_on_empty: true
+      fast_switch_labels:
+        - ball_focus
+      fast_switch_min_hold_seconds: 0.05
+      fast_switch_margin: -0.03
+      deadband: 0.007
+      response_time_seconds: 0.34
       max_speed_normalized_per_second: 0.30
-      max_acceleration_normalized_per_second2: 0.95
+      max_acceleration_normalized_per_second2: 1.20
+      fast_response_time_seconds: 0.12
+      fast_max_speed_normalized_per_second: 0.78
+      fast_max_acceleration_normalized_per_second2: 3.40
+      fast_error_threshold: 0.055
+      fast_boost_seconds: 0.34
     local_shots:
       histogram_threshold: 0.52
       minimum_shot_seconds: 0.30
 
   movie:
     detection:
-      detection_fps: 8.0
-      person_min_score: 0.35
+      detection_fps: 10.0
+      person_min_score: 0.34
       ball_min_score: 0.30
-      face_min_score: 0.45
-      max_results: 40
+      face_min_score: 0.42
+      face_min_suppression: 0.30
+      face_min_size_fraction: 0.030
+      max_results: 50
     tracking:
       max_missed_updates: 5
       match_center_distance: 0.16
+      ball_match_center_distance: 0.24
       min_iou: 0.03
-      box_alpha: 0.70
+      box_alpha: 0.74
+      ball_box_alpha: 0.88
+      prediction_max_frames: 9
+      ball_prediction_max_frames: 18
+      prediction_max_distance: 0.08
     selection:
       min_track_hits: 2
-      min_face_area: 0.0015
-      group_score_ratio: 0.72
-      group_crop_width_factor: 1.05
-      min_motion_score: 0.10
+      min_face_area: 0.0012
+      group_score_ratio: 0.70
+      group_crop_width_factor: 1.08
+      min_motion_score: 0.14
+      motion_only_without_subjects: true
     temporal:
-      min_hold_seconds: 0.85
-      lost_hold_seconds: 0.55
-      switch_margin: 0.17
-      deadband: 0.005
-      response_time_seconds: 0.44
-      max_speed_normalized_per_second: 0.21
-      max_acceleration_normalized_per_second2: 0.58
+      min_hold_seconds: 0.68
+      lost_hold_seconds: 0.42
+      switch_margin: 0.14
+      hold_last_on_empty: true
+      fast_switch_labels:
+        - action_region
+      fast_switch_min_hold_seconds: 0.18
+      fast_switch_margin: 0.04
+      deadband: 0.006
+      response_time_seconds: 0.40
+      max_speed_normalized_per_second: 0.24
+      max_acceleration_normalized_per_second2: 0.78
+      fast_response_time_seconds: 0.18
+      fast_max_speed_normalized_per_second: 0.56
+      fast_max_acceleration_normalized_per_second2: 2.20
+      fast_error_threshold: 0.075
+      fast_boost_seconds: 0.28
     local_shots:
       histogram_threshold: 0.48
       minimum_shot_seconds: 0.24

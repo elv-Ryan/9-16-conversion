@@ -31,6 +31,7 @@ class VerticalFocusProducer(TagMessageProducer):
             mode=runtime.mode,
             policy_config=policy,
             object_model=runtime.object_model,
+            face_model=runtime.face_model,
             delegate=runtime.delegate,
             shots=self.shots,
             progress_log_interval_seconds=runtime.progress_log_interval_seconds,

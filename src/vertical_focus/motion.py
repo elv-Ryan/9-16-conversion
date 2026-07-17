@@ -12,10 +12,18 @@ from .types import Detection
 class MotionEstimator:
     """Produces one coarse normalized action region from frame differencing."""
 
-    def __init__(self, *, scale_width: int = 320, threshold: int = 22, min_area: float = 0.002) -> None:
+    def __init__(
+        self,
+        *,
+        scale_width: int = 320,
+        threshold: int = 22,
+        min_area: float = 0.002,
+        max_global_fraction: float = 0.30,
+    ) -> None:
         self.scale_width = max(96, int(scale_width))
         self.threshold = int(threshold)
         self.min_area = float(min_area)
+        self.max_global_fraction = float(max_global_fraction)
         self._previous: Optional[np.ndarray] = None
 
     def reset(self) -> None:
@@ -38,18 +46,28 @@ class MotionEstimator:
         _, mask = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         frame_area = float(self.scale_width * scaled_height)
-        kept = [c for c in contours if cv2.contourArea(c) / frame_area >= self.min_area]
+        active_fraction = cv2.countNonZero(mask) / frame_area
+        if active_fraction > self.max_global_fraction:
+            # Fades, flashes, hard cuts, and broad camera motion are not a
+            # reliable local focus target.
+            return None
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        kept = [contour for contour in contours if cv2.contourArea(contour) / frame_area >= self.min_area]
         if not kept:
             return None
 
-        kept = sorted(kept, key=cv2.contourArea, reverse=True)[:6]
-        x1 = min(cv2.boundingRect(c)[0] for c in kept)
-        y1 = min(cv2.boundingRect(c)[1] for c in kept)
-        x2 = max(cv2.boundingRect(c)[0] + cv2.boundingRect(c)[2] for c in kept)
-        y2 = max(cv2.boundingRect(c)[1] + cv2.boundingRect(c)[3] for c in kept)
-        total_area = sum(cv2.contourArea(c) for c in kept) / frame_area
+        kept = sorted(kept, key=cv2.contourArea, reverse=True)[:4]
+        x1 = min(cv2.boundingRect(contour)[0] for contour in kept)
+        y1 = min(cv2.boundingRect(contour)[1] for contour in kept)
+        x2 = max(cv2.boundingRect(contour)[0] + cv2.boundingRect(contour)[2] for contour in kept)
+        y2 = max(cv2.boundingRect(contour)[1] + cv2.boundingRect(contour)[3] for contour in kept)
+        total_area = sum(cv2.contourArea(contour) for contour in kept) / frame_area
+        region_width = (x2 - x1) / self.scale_width
+        if region_width > 0.90 and total_area < 0.16:
+            return None
+
         return Detection(
             label="motion",
             score=min(1.0, total_area * 8.0),

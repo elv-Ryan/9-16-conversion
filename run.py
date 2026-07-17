@@ -58,6 +58,7 @@ if __name__ == "__main__":
                 "mode": runtime.mode,
                 "delegate": runtime.delegate,
                 "detection_fps": runtime.detection_fps,
+                "face_model": runtime.face_model,
                 "shot_track": runtime.shot_track,
                 "continue_on_error": True,
             },

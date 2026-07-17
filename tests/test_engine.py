@@ -69,6 +69,7 @@ class EngineTests(unittest.TestCase):
                 mode="movie",
                 policy_config=CONFIG,
                 object_model="unused",
+                face_model="unused",
                 delegate="cpu",
                 shots=TagStoreShots([]),
                 progress_log_interval_seconds=10.0,

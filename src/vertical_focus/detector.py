@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Optional
 
+import cv2
 from loguru import logger
 import numpy as np
 
@@ -10,18 +12,27 @@ from .types import Detection
 
 
 class MediaPipeFocusDetector:
-    """Person/ball object detection plus face detection.
+    """EfficientDet person/ball detection plus MediaPipe Tasks face detection.
 
-    The detector is lazy so policy and contract unit tests do not need to load
-    TensorFlow Lite or MediaPipe native libraries.
+    The detector is loaded lazily. If the MediaPipe face task cannot be created,
+    OpenCV's bundled frontal-face cascade is used as a non-fatal fallback.
     """
 
-    def __init__(self, *, model_path: str, delegate: str, config: Dict) -> None:
+    def __init__(
+        self,
+        *,
+        model_path: str,
+        face_model_path: str,
+        delegate: str,
+        config: Dict,
+    ) -> None:
         self.model_path = model_path
+        self.face_model_path = face_model_path
         self.delegate = delegate
         self.config = config
         self._object_detector = None
         self._face_detector = None
+        self._face_cascade: Optional[cv2.CascadeClassifier] = None
         self._mp = None
         self._last_timestamp_ms = -1
         self._face_warning_emitted = False
@@ -29,6 +40,7 @@ class MediaPipeFocusDetector:
     def _ensure_loaded(self) -> None:
         if self._object_detector is not None:
             return
+
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
@@ -38,36 +50,67 @@ class MediaPipeFocusDetector:
             if self.delegate == "gpu"
             else mp_python.BaseOptions.Delegate.CPU
         )
-        base_options = mp_python.BaseOptions(model_asset_path=self.model_path, delegate=delegate)
         detection_cfg = self.config.get("detection", {})
+        object_base_options = mp_python.BaseOptions(
+            model_asset_path=self.model_path,
+            delegate=delegate,
+        )
         self._object_detector = vision.ObjectDetector.create_from_options(
             vision.ObjectDetectorOptions(
-                base_options=base_options,
+                base_options=object_base_options,
                 max_results=int(detection_cfg.get("max_results", 50)),
                 score_threshold=min(
                     float(detection_cfg.get("person_min_score", 0.35)),
                     float(detection_cfg.get("ball_min_score", 0.25)),
                 ),
+                category_allowlist=["person", "sports ball"],
                 running_mode=vision.RunningMode.VIDEO,
             )
         )
         self._mp = mp
 
-        # The Solutions API bundles its own full-range face model. Some future
-        # MediaPipe builds may remove this API, in which case movie policy still
-        # degrades to tracked people/action rather than failing the container.
-        try:
-            self._face_detector = mp.solutions.face_detection.FaceDetection(
-                model_selection=1,
-                min_detection_confidence=float(detection_cfg.get("face_min_score", 0.45)),
+        face_path = Path(self.face_model_path)
+        if face_path.is_file():
+            try:
+                face_base_options = mp_python.BaseOptions(
+                    model_asset_path=str(face_path),
+                    delegate=delegate,
+                )
+                self._face_detector = vision.FaceDetector.create_from_options(
+                    vision.FaceDetectorOptions(
+                        base_options=face_base_options,
+                        running_mode=vision.RunningMode.VIDEO,
+                        min_detection_confidence=float(detection_cfg.get("face_min_score", 0.45)),
+                        min_suppression_threshold=float(
+                            detection_cfg.get("face_min_suppression", 0.30)
+                        ),
+                    )
+                )
+                logger.info("face detector loaded model={}", face_path)
+            except Exception as exc:  # pragma: no cover - native library/model dependent
+                logger.warning(
+                    "MediaPipe Tasks face detector failed; using OpenCV cascade: {}",
+                    exc,
+                )
+                self._face_detector = None
+        else:
+            logger.warning(
+                "Face model missing at {}; using OpenCV cascade",
+                face_path,
             )
-        except Exception as exc:  # pragma: no cover - depends on mediapipe build
-            logger.warning("Face detector unavailable; using person/action fallback: {}", exc)
-            self._face_detector = None
+
+        if self._face_detector is None:
+            cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_alt2.xml"
+            cascade = cv2.CascadeClassifier(str(cascade_path))
+            if not cascade.empty():
+                self._face_cascade = cascade
+                logger.info("face detector fallback loaded model={}", cascade_path)
 
     def detect(self, rgb: np.ndarray, timestamp_ms: int) -> List[Detection]:
         self._ensure_loaded()
         assert self._mp is not None
+        assert self._object_detector is not None
+
         height, width = rgb.shape[:2]
         detections: List[Detection] = []
         detection_cfg = self.config.get("detection", {})
@@ -76,6 +119,7 @@ class MediaPipeFocusDetector:
         timestamp_ms = max(int(timestamp_ms), self._last_timestamp_ms + 1)
         self._last_timestamp_ms = timestamp_ms
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+
         result = self._object_detector.detect_for_video(image, timestamp_ms)
         for item in result.detections:
             if not item.categories:
@@ -110,37 +154,65 @@ class MediaPipeFocusDetector:
                             (box.origin_y + box.height) / height,
                         )
                     ),
-                    source="efficientdet",
+                    source="efficientdet_lite0",
                 )
             )
 
         if self._face_detector is not None:
             try:
-                face_result = self._face_detector.process(rgb)
-                for face in face_result.detections or []:
-                    score = float(face.score[0]) if face.score else 0.0
+                face_result = self._face_detector.detect_for_video(image, timestamp_ms)
+                for face in face_result.detections:
+                    score = (
+                        float(face.categories[0].score)
+                        if getattr(face, "categories", None)
+                        else 1.0
+                    )
                     if score < float(detection_cfg.get("face_min_score", 0.45)):
                         continue
-                    relative = face.location_data.relative_bounding_box
+                    box = face.bounding_box
                     detections.append(
                         Detection(
                             label="face",
                             score=score,
                             box=sanitize_box(
                                 (
-                                    relative.xmin,
-                                    relative.ymin,
-                                    relative.xmin + relative.width,
-                                    relative.ymin + relative.height,
+                                    box.origin_x / width,
+                                    box.origin_y / height,
+                                    (box.origin_x + box.width) / width,
+                                    (box.origin_y + box.height) / height,
                                 )
                             ),
-                            source="mediapipe_face",
+                            source="blazeface_short_range",
                         )
                     )
             except Exception as exc:  # pragma: no cover - native model edge cases
                 if not self._face_warning_emitted:
-                    logger.warning("Face inference failed; continuing with other evidence: {}", exc)
+                    logger.warning(
+                        "Face task inference failed; continuing with cascade/person evidence: {}",
+                        exc,
+                    )
                     self._face_warning_emitted = True
+        elif self._face_cascade is not None:
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            minimum_fraction = float(detection_cfg.get("face_min_size_fraction", 0.03))
+            minimum_pixels = max(20, int(round(min(width, height) * minimum_fraction)))
+            boxes = self._face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.10,
+                minNeighbors=5,
+                minSize=(minimum_pixels, minimum_pixels),
+                flags=cv2.CASCADE_SCALE_IMAGE,
+            )
+            for x, y, w, h in boxes:
+                detections.append(
+                    Detection(
+                        label="face",
+                        score=max(0.50, float(detection_cfg.get("face_min_score", 0.45))),
+                        box=sanitize_box((x / width, y / height, (x + w) / width, (y + h) / height)),
+                        source="opencv_haar_fallback",
+                    )
+                )
+
         return detections
 
     def close(self) -> None:

@@ -10,6 +10,7 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path(os.getenv("VERTICAL_FOCUS_CONFIG", "configs/policies.yml"))
 DEFAULT_MODEL_PATH = "/elv/model/models/mp_tasks/object_detector/efficientdet_lite0.tflite"
+DEFAULT_FACE_MODEL_PATH = "/elv/model/models/mp_tasks/face_detector/blaze_face_short_range.tflite"
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class RuntimeParams:
     mode: str = "movie"
     config_path: str = str(DEFAULT_CONFIG_PATH)
     object_model: str = DEFAULT_MODEL_PATH
+    face_model: str = DEFAULT_FACE_MODEL_PATH
     delegate: str = "cpu"
     detection_fps: Optional[float] = None
     shot_track: str = "shot_detection"
