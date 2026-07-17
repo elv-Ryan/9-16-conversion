@@ -1,8 +1,8 @@
 # Eluvio 9:16 Vertical Focus
 
-This repository is an Eluvio tagger container that analyzes each video frame and emits the horizontal center point needed for a fixed-height 9:16 crop.
+Eluvio tagger container that analyzes each video frame and emits the horizontal center point needed for a fixed-height 9:16 crop.
 
-It does not render the production video. It does not move vertically, zoom, stretch, or compress the picture. It only decides the normalized X center for each frame and writes compact JSONL tags for the Fabric.
+It does not render the production video. It does not move vertically, zoom, stretch, or compress the picture. It only decides the normalized X center for each frame and writes JSONL tags for the Fabric.
 
 Supported policies:
 
@@ -13,16 +13,14 @@ Supported policies:
 
 | v1 | v2 (`ryan-v2`) |
 |---|---|
-| AutoFlip-oriented local reframing demo | Deployable Eluvio tagger container |
+| Local demo | Deployable Eluvio tagger container |
 | Primarily face-based crop selection | Separate sports and movie policies |
 | Rendered a cropped video | Emits frame-level normalized X coordinates |
-| Custom/legacy execution paths | Uses `common-ml` stdin, JSONL, error, and progress handling |
+| Custom/legacy execution | Uses `common-ml` stdin, JSONL, error, and progress handling |
 | One implicit focus result | Three output tracks per shot |
-| Weak shot awareness | Tagstore `shot_detection` integration with local cut fallback |
-| Pixel/frame smoothing | Time-normalized causal speed and acceleration limits |
+| No shot awareness | Tagstore `shot_detection` integration |
+| Simple frame smoothing | Frame smoothing with speed and acceleration limits |
 | No stable focus identity | Deterministic person, face, and ball tracking IDs |
-| Could chase a small ball | Ball normally selects a nearby player or action group |
-| Mixed local artifacts and old MediaPipe source | Clean Python package, OCI Containerfile, buildscripts workflow |
 
 The current version establishes the deployment foundation. The exact sports/movie focus selection and smoothing values still require refinement from visual QA.
 
@@ -36,12 +34,9 @@ The object detector is **MediaPipe Tasks ObjectDetector** using:
 models/mp_tasks/object_detector/efficientdet_lite0.tflite
 ```
 
-This is **EfficientDet-Lite0**, run through TensorFlow Lite by MediaPipe. The code keeps only:
+This is **EfficientDet-Lite0**, run through TensorFlow Lite by MediaPipe.
 
-- `person`
-- `sports ball` / `ball`
-
-The default delegate is CPU. GPU can be requested with `"delegate":"gpu"` only on a host where the MediaPipe GPU delegate works.
+The default is CPU. GPU can be requested with `"delegate":"gpu"` on a host where the MediaPipe GPU delegate works.
 
 ### Face model
 
@@ -55,12 +50,10 @@ If face inference is unavailable, the model continues with person, motion, and s
 
 ### Tracking
 
-Detections are associated frame to frame using a deterministic lightweight tracker. Association uses:
+Detections are associated frame to frame using a lightweight tracker. Association uses:
 
 - matching label
-- bounding-box intersection-over-union
-- normalized center distance
-- exponentially blended boxes
+- bounding-box intersection over frames
 - a maximum missed-update lifetime
 
 The resulting IDs look like `person:3`, `face:7`, or `ball:2`.
@@ -70,10 +63,6 @@ The resulting IDs look like `person:3`, `face:7`, or `ball:2`.
 When `ELV_CONTENT` and `ELV_TOKEN` are available, shot ranges are loaded from the Fabric `shot_detection` track. Requests are paginated.
 
 Without Fabric credentials, a local HSV histogram cut detector resets the focus tracker and camera smoothing at detected cuts.
-
-### Motion
-
-Motion is image-derived evidence used only as a fallback or supporting signal. It is not a separate neural network.
 
 ### Smoothing
 
@@ -105,7 +94,7 @@ printf '/elv/test/sports_01.mp4\n' | podman run --rm -i \
 
 ## Output tracks
 
-Each shot emits three logical outputs.
+Each shot emits three outputs.
 
 ### `vertical_video`
 
@@ -142,7 +131,7 @@ Up to `max_boxes_per_shot` representative normalized bounding boxes are emitted 
 |---|---|
 | `version` | Human-readable policy revision. Written into `focus.additional_info.policy_version`. |
 | `schema_version` | Name of the policy-file structure. Written into `focus.additional_info.policy_schema`. |
-| `policies` | Contains the two permitted runtime modes: `sports` and `movie`. |
+| `policies` | Contains the permitted runtime modes: `sports` and `movie`. |
 | `output` | Controls output track names, numeric precision, and bbox count. |
 
 ### Fields shared by both policies
@@ -270,22 +259,6 @@ Expected test inputs:
 test-files/short/sports_01.mp4 ... sports_04.mp4
 test-files/short/movie_01.mp4  ... movie_04.mp4
 ```
-
-## Side-by-side preview audio
-
-The visual renderer creates silent side-by-side previews. To copy audio from each original short clip into its matching preview:
-
-```bash
-./scripts/remux_preview_audio.sh
-```
-
-Audio previews are written to:
-
-```text
-test-output/visual/previews-audio/
-```
-
-This remux step does not alter the model output or production JSONL.
 
 ## Build and deployment
 
