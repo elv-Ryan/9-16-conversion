@@ -1,3 +1,3 @@
-[submodule "vendor/mediapipe"]
-	path = vendor/mediapipe
-	url = https://github.com/google-ai-edge/mediapipe.git
+[submodule "buildscripts"]
+	path = buildscripts
+	url = git@github.com:qluvio/buildscripts.git

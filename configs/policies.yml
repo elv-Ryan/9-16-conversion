@@ -1,0 +1,78 @@
+version: 2
+schema_version: vertical_focus_policy_v2
+
+policies:
+  sports:
+    detection:
+      detection_fps: 8.0
+      person_min_score: 0.35
+      ball_min_score: 0.25
+      face_min_score: 0.50
+      max_results: 50
+    tracking:
+      max_missed_updates: 4
+      match_center_distance: 0.18
+      min_iou: 0.03
+      box_alpha: 0.68
+    selection:
+      min_track_hits: 2
+      min_person_area: 0.0025
+      direct_ball_min_area: 0.0040
+      ball_player_radius: 0.22
+      min_ball_player_score: 0.48
+      group_radius: 0.24
+      max_group_size: 3
+      announcer_face_min_area: 0.025
+      min_motion_score: 0.08
+      crowd_min_people: 4
+      crowd_max_median_area: 0.015
+      crowd_max_motion_score: 0.20
+      crowd_group_score: 0.42
+    temporal:
+      min_hold_seconds: 0.55
+      lost_hold_seconds: 0.40
+      switch_margin: 0.13
+      deadband: 0.006
+      response_time_seconds: 0.30
+      max_speed_normalized_per_second: 0.30
+      max_acceleration_normalized_per_second2: 0.95
+    local_shots:
+      histogram_threshold: 0.52
+      minimum_shot_seconds: 0.30
+
+  movie:
+    detection:
+      detection_fps: 8.0
+      person_min_score: 0.35
+      ball_min_score: 0.30
+      face_min_score: 0.45
+      max_results: 40
+    tracking:
+      max_missed_updates: 5
+      match_center_distance: 0.16
+      min_iou: 0.03
+      box_alpha: 0.70
+    selection:
+      min_track_hits: 2
+      min_face_area: 0.0015
+      group_score_ratio: 0.72
+      group_crop_width_factor: 1.05
+      min_motion_score: 0.10
+    temporal:
+      min_hold_seconds: 0.85
+      lost_hold_seconds: 0.55
+      switch_margin: 0.17
+      deadband: 0.005
+      response_time_seconds: 0.44
+      max_speed_normalized_per_second: 0.21
+      max_acceleration_normalized_per_second2: 0.58
+    local_shots:
+      histogram_threshold: 0.48
+      minimum_shot_seconds: 0.24
+
+output:
+  vertical_track: vertical_video
+  focus_track: focus
+  bbox_track: focus_bbox
+  coordinate_decimals: 6
+  max_boxes_per_shot: 3

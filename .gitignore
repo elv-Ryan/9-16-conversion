@@ -1,27 +1,16 @@
-# Data artifacts
-data/in/*
-data/out/*
-*.mp4
-*.avi
-
-# macOS
-.DS_Store
-
-# Python
 .venv/
 __pycache__/
 *.pyc
-
-# Bazel / MediaPipe build outputs
-vendor/mediapipe/bazel-*
-vendor/mediapipe/.cache/
-vendor/mediapipe/.bazel*
-vendor/mediapipe/mediapipe/models/*.tflite
-
-# Logs
-*.log
-data/in/
-data/out/
-data/tmp/
-*.avi
+.pytest_cache/
+.cache/
+version/
+test-output/
+test-files/*
+!test-files/.gitkeep
 *.mp4
+*.mov
+*.m4v
+*.mkv
+*.avi
+*.log
+.DS_Store
