@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from vertical_focus.engine import VerticalFocusEngine
-from vertical_focus.shots import TagStoreShots
+from vertical_focus.shots import ShotRange, TagStoreShots
 from vertical_focus.types import Detection
 
 
@@ -89,6 +89,41 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(60, len(shot.decisions))
             self.assertTrue(all(0.0 <= decision.x_center <= 1.0 for shot in result.shots for decision in shot.decisions))
             self.assertGreater(result.duration_ms, 1900)
+
+    def test_tagstore_shot_boundaries_do_not_split_the_file(self):
+        # Regression: the vertical_video track must never be split by shot
+        # boundaries. A tagstore boundary in the middle of the file used to
+        # produce two tags (e.g. 0-40 with a single x, then 40-end). The engine
+        # must ignore tagstore shots and emit exactly one whole-file shot.
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "boundary.avi")
+            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 25.0, (320, 180))
+            self.assertTrue(writer.isOpened())
+            for _ in range(44):
+                frame = np.zeros((180, 320, 3), dtype=np.uint8)
+                cv2.rectangle(frame, (150, 30), (190, 165), (255, 255, 255), -1)
+                writer.write(frame)
+            writer.release()
+
+            engine = VerticalFocusEngine(
+                mode="movie",
+                policy_config=CONFIG,
+                object_model="unused",
+                delegate="cpu",
+                # A boundary at 40ms is exactly the split the bug produced.
+                shots=TagStoreShots([ShotRange("s0", 0, 40), ShotRange("s1", 40, 1760)]),
+                progress_log_interval_seconds=100.0,
+                detector=FakeDetector(),
+            )
+            result = engine.process_file(path, 0)
+            engine.close()
+
+            self.assertEqual(1, len(result.shots))
+            shot = result.shots[0]
+            self.assertEqual(0, shot.start_ms)
+            self.assertEqual(0, shot.start_frame_idx)
+            self.assertEqual(result.duration_ms, shot.end_ms)
+            self.assertEqual(44, len(shot.decisions))
 
 
 if __name__ == "__main__":
