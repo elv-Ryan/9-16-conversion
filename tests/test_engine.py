@@ -51,7 +51,7 @@ class FakeDetector:
 
 
 class EngineTests(unittest.TestCase):
-    def test_decodes_every_frame_and_emits_shot_output(self):
+    def test_decodes_every_frame_and_emits_single_shot(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "synthetic.avi")
             writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (320, 180))
@@ -78,7 +78,15 @@ class EngineTests(unittest.TestCase):
             engine.close()
 
             self.assertEqual(60, sum(len(shot.decisions) for shot in result.shots))
-            self.assertGreaterEqual(len(result.shots), 2)
+            # Regardless of scene cuts within the file, the vertical_video track
+            # is a single uncut trajectory: exactly one shot per file, spanning
+            # the whole media from start_ms 0 to the full duration.
+            self.assertEqual(1, len(result.shots))
+            shot = result.shots[0]
+            self.assertEqual(0, shot.start_ms)
+            self.assertEqual(0, shot.start_frame_idx)
+            self.assertEqual(result.duration_ms, shot.end_ms)
+            self.assertEqual(60, len(shot.decisions))
             self.assertTrue(all(0.0 <= decision.x_center <= 1.0 for shot in result.shots for decision in shot.decisions))
             self.assertGreater(result.duration_ms, 1900)
 

@@ -9,7 +9,7 @@ from .detector import MediaPipeFocusDetector
 from .geometry import crop_width_normalized
 from .motion import MotionEstimator
 from .policy import FocusPolicy
-from .shots import LocalShotDetector, ShotRange, TagStoreShots
+from .shots import TagStoreShots
 from .smoothing import SmoothCamera
 from .tracker import TrackManager
 from .types import FileProcessResult, FrameDecision, ShotOutput
@@ -76,17 +76,10 @@ class VerticalFocusEngine:
         crop_width = crop_width_normalized(info.width, info.height)
         detection_fps = float(self.config.get("detection", {}).get("detection_fps", 8.0))
         detection_period_ms = max(1, int(round(1000.0 / detection_fps)))
-        local_cfg = self.config.get("local_shots", {})
-        local_shots = LocalShotDetector(
-            threshold=float(local_cfg.get("histogram_threshold", 0.5)),
-            minimum_seconds=float(local_cfg.get("minimum_shot_seconds", 0.25)),
-            fps=info.fps,
-        )
 
         outputs: List[ShotOutput] = []
         current_decisions: List[FrameDecision] = []
         current_shot_id: Optional[str] = None
-        current_shot_range: Optional[ShotRange] = None
         current_start_hint_ms = 0
         last_log_time_ms = -1
 
@@ -112,39 +105,17 @@ class VerticalFocusEngine:
         try:
             for frame in reader:
                 global_time_ms = int(content_offset_ms + frame.time_ms)
-                tagstore_shot = self.shots.at(global_time_ms) if self.shots.available else None
-                local_cut = False
-                if tagstore_shot is not None:
-                    shot_id = f"tagstore:{tagstore_shot.shot_id}"
-                    start_hint_ms = max(0, tagstore_shot.start_ms - content_offset_ms)
-                    end_hint_ms = min(
-                        info.duration_ms if info.duration_ms > 0 else 2**31 - 1,
-                        tagstore_shot.end_ms - content_offset_ms,
-                    )
-                else:
-                    local_cut = local_shots.update(frame.rgb, frame.frame_idx)
-                    shot_id = f"local:{self.file_sequence}:{local_shots.shot_index}"
-                    start_hint_ms = frame.time_ms if local_cut or current_shot_id is None else current_start_hint_ms
-                    end_hint_ms = 0
-
+                # The vertical_video track is a single, uncut focus trajectory
+                # covering the whole input file. We deliberately do not consult
+                # the tagstore, run local shot detection, or infer anything from
+                # the filename: every file yields exactly one shot that starts at
+                # 0 and ends at the full media duration.
+                shot_id = f"file:{self.file_sequence}"
                 if current_shot_id is None:
                     current_shot_id = shot_id
-                    current_shot_range = tagstore_shot
-                    current_start_hint_ms = start_hint_ms
+                    current_start_hint_ms = 0
                     if self.active_shot_id != shot_id or self.smoother is None:
                         self._reset_for_shot(shot_id, crop_width)
-                elif shot_id != current_shot_id:
-                    previous_end = frame.time_ms
-                    if current_shot_range is not None:
-                        previous_end = min(
-                            max(previous_end, current_start_hint_ms + 1),
-                            max(current_start_hint_ms + 1, current_shot_range.end_ms - content_offset_ms),
-                        )
-                    finalize(previous_end)
-                    current_shot_id = shot_id
-                    current_shot_range = tagstore_shot
-                    current_start_hint_ms = start_hint_ms
-                    self._reset_for_shot(shot_id, crop_width)
 
                 tracking_frame_idx = self.global_frame_idx
                 self.global_frame_idx += 1
@@ -208,10 +179,8 @@ class VerticalFocusEngine:
             reader.close()
 
         if current_decisions:
-            final_end = effective_duration_ms
-            if current_shot_range is not None:
-                final_end = min(final_end, max(current_start_hint_ms + 1, current_shot_range.end_ms - content_offset_ms))
-            finalize(final_end)
+            # A single shot spanning the whole file: end at the full duration.
+            finalize(effective_duration_ms)
 
         self.file_sequence += 1
         logger.info(

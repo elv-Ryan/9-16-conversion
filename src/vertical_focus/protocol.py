@@ -22,11 +22,11 @@ class VerticalFocusProducer(TagMessageProducer):
         policy, output, metadata = load_configuration(runtime)
         self.output_config = output
         self.policy_metadata = metadata
-        self.shots = TagStoreShots.from_environment(
-            base_url=runtime.tagstore_url,
-            track=runtime.shot_track,
-            timeout_seconds=runtime.request_timeout_seconds,
-        )
+        # The vertical_video track is a single, whole-file focus trajectory, so
+        # we never consult the tagstore for shot boundaries (nor run local shot
+        # detection, nor infer anything from the filename). An empty shot set
+        # keeps the engine on its single-shot-per-file path.
+        self.shots = TagStoreShots([])
         self.engine = VerticalFocusEngine(
             mode=runtime.mode,
             policy_config=policy,
