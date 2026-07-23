@@ -29,4 +29,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install . \
     && python -c "import common_ml, vertical_focus; from common_ml.tagging.run_helpers import catch_errors, get_params, run_default; print('vertical-focus imports OK')"
 
+##ENV CUDA_VISIBLE_DEVICES=0
+
+
 ENTRYPOINT ["python", "-u", "run.py"]

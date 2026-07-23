@@ -44,6 +44,8 @@ printf '%s' "$INPUT" | podman run --rm -i \
   --volume="$PWD/$INPUT_DIR:/elv/test:ro" \
   --volume="$PWD/$OUTPUT_DIR:/elv/tags" \
   --network=host \
+  --device=nvidia.com/gpu=all \
+  -e CUDA_VISIBLE_DEVICES=0 \
   "$IMAGE_NAME:latest" \
   --output-path /elv/tags/out.jsonl \
   --params "{\"continue_on_error\":true,\"detector_backend\":\"yolo26\",\"mode\":\"${MODE}\"}"
