@@ -9,15 +9,21 @@ import os
 import yaml
 
 DEFAULT_CONFIG_PATH = Path(os.getenv("VERTICAL_FOCUS_CONFIG", "configs/policies.yml"))
-DEFAULT_MODEL_PATH = "/elv/model/models/mp_tasks/object_detector/efficientdet_lite0.tflite"
+DEFAULT_YOLO26_DETECT_MODEL_PATH = "/elv/model/models/yolo26/yolo26s.pt"
+DEFAULT_YOLO26_POSE_MODEL_PATH = "/elv/model/models/yolo26/yolo26n-pose.pt"
 
 
 @dataclass(frozen=True)
 class RuntimeParams:
     mode: str = "movie"
     config_path: str = str(DEFAULT_CONFIG_PATH)
-    object_model: str = DEFAULT_MODEL_PATH
-    delegate: str = "cpu"
+    detector_backend: str = "yolo26"
+    yolo_detect_model: str = DEFAULT_YOLO26_DETECT_MODEL_PATH
+    yolo_pose_model: str = DEFAULT_YOLO26_POSE_MODEL_PATH
+    yolo_device: str = "0"
+    yolo_imgsz: Optional[int] = None
+    yolo_half: bool = True
+    yolo_end2end: bool = False
     detection_fps: Optional[float] = None
     shot_track: str = "shot_detection"
     tagstore_url: str = "https://ai.contentfabric.io"
@@ -29,6 +35,13 @@ class RuntimeParams:
     bbox_track: Optional[str] = None
     max_boxes_per_shot: Optional[int] = None
     policy_overrides: Optional[Dict[str, Any]] = None
+    debug_jsonl_path: str = ""
+
+    # Accepted only for compatibility with existing callers. These values are
+    # never consumed by the YOLO26 runtime and do not enable another backend.
+    object_model: str = ""
+    face_model: str = ""
+    delegate: str = "cpu"
 
 
 def _nested_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,11 +75,20 @@ def runtime_params_from_dict(params: Dict[str, Any]) -> RuntimeParams:
         raise ValueError("mode must be exactly 'sports' or 'movie'")
     values["mode"] = mode
 
+    detector_backend = str(values.get("detector_backend", "yolo26")).strip().lower()
+    if detector_backend != "yolo26":
+        raise ValueError("detector_backend must be exactly 'yolo26'")
+    values["detector_backend"] = detector_backend
+
+    # Retain validation for the inert compatibility parameter so malformed
+    # existing requests still fail deterministically.
     delegate = str(values.get("delegate", "cpu")).strip().lower()
     if delegate not in {"cpu", "gpu"}:
         raise ValueError("delegate must be 'cpu' or 'gpu'")
     values["delegate"] = delegate
 
+    if values.get("yolo_imgsz") is not None and int(values["yolo_imgsz"]) <= 0:
+        raise ValueError("yolo_imgsz must be > 0")
     if values.get("detection_fps") is not None and float(values["detection_fps"]) <= 0:
         raise ValueError("detection_fps must be > 0")
     return RuntimeParams(**values)

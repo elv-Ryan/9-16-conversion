@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 import unittest
@@ -5,6 +6,7 @@ import unittest
 import cv2
 import numpy as np
 
+from vertical_focus.config import RuntimeParams, load_configuration
 from vertical_focus.engine import VerticalFocusEngine
 from vertical_focus.shots import ShotRange, TagStoreShots
 from vertical_focus.types import Detection
@@ -50,6 +52,36 @@ class FakeDetector:
         pass
 
 
+class GradualMoveDetector:
+    def detect(self, rgb, timestamp_ms):
+        del rgb
+        if timestamp_ms < 800:
+            center = 0.28
+        elif timestamp_ms < 1400:
+            center = 0.28 + 0.40 * ((timestamp_ms - 800) / 600.0)
+        else:
+            center = 0.68
+        return [Detection("person", 0.92, (center - 0.09, 0.15, center + 0.09, 0.92))]
+
+    def close(self):
+        pass
+
+
+class FailOnceDetector:
+    def __init__(self):
+        self.failed = False
+
+    def detect(self, rgb, timestamp_ms):
+        del rgb, timestamp_ms
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("synthetic detector failure")
+        return [Detection("person", 0.90, (0.35, 0.15, 0.55, 0.92))]
+
+    def close(self):
+        pass
+
+
 class EngineTests(unittest.TestCase):
     def test_decodes_every_frame_and_emits_single_shot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -65,13 +97,16 @@ class EngineTests(unittest.TestCase):
                 writer.write(frame)
             writer.release()
 
+            debug_path = str(Path(directory) / "debug.jsonl")
             engine = VerticalFocusEngine(
                 mode="movie",
                 policy_config=CONFIG,
                 object_model="unused",
+                face_model="unused",
                 delegate="cpu",
                 shots=TagStoreShots([]),
                 progress_log_interval_seconds=10.0,
+                debug_jsonl_path=debug_path,
                 detector=FakeDetector(),
             )
             result = engine.process_file(path, 0)
@@ -89,6 +124,42 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(60, len(shot.decisions))
             self.assertTrue(all(0.0 <= decision.x_center <= 1.0 for shot in result.shots for decision in shot.decisions))
             self.assertGreater(result.duration_ms, 1900)
+
+            debug_rows = [
+                json.loads(line)
+                for line in Path(debug_path).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(60, len(debug_rows))
+            self.assertTrue(all(row["mode"] == "movie" for row in debug_rows))
+            self.assertTrue(all(0.0 < row["crop_width"] <= 1.0 for row in debug_rows))
+            self.assertTrue(
+                all(
+                    {
+                        "key",
+                        "label",
+                        "scene_state",
+                        "evidence_kind",
+                        "smoothing_regime",
+                        "focus_ids",
+                        "boxes",
+                    }
+                    <= set(row["selected"])
+                    for row in debug_rows
+                )
+            )
+            self.assertTrue(
+                all(
+                    all(
+                        set(box) == {"id", "label", "score", "box"}
+                        and len(box["box"]) == 4
+                        and 0.0 <= box["box"][0] < box["box"][2] <= 1.0
+                        and 0.0 <= box["box"][1] < box["box"][3] <= 1.0
+                        for box in row["selected"]["boxes"]
+                    )
+                    for row in debug_rows
+                )
+            )
 
     def test_tagstore_shot_boundaries_do_not_split_the_file(self):
         # Regression: the vertical_video track must never be split by shot
@@ -124,6 +195,74 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(0, shot.start_frame_idx)
             self.assertEqual(result.duration_ms, shot.end_ms)
             self.assertEqual(44, len(shot.decisions))
+
+    def test_failed_input_does_not_leak_state_into_next_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "recover.avi")
+            writer = cv2.VideoWriter(
+                path, cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (320, 180)
+            )
+            self.assertTrue(writer.isOpened())
+            for _ in range(18):
+                writer.write(np.zeros((180, 320, 3), dtype=np.uint8))
+            writer.release()
+
+            engine = VerticalFocusEngine(
+                mode="movie",
+                policy_config=CONFIG,
+                shots=TagStoreShots([]),
+                progress_log_interval_seconds=10.0,
+                detector=FailOnceDetector(),
+            )
+            with self.assertRaisesRegex(RuntimeError, "synthetic detector failure"):
+                engine.process_file(path, 0)
+            result = engine.process_file(path, 0)
+            engine.close()
+
+            self.assertEqual(
+                18, sum(len(shot.decisions) for shot in result.shots)
+            )
+            # file_sequence increments even on a failed attempt, so the
+            # recovered call is sequence 1 (not the old "local:1:..." shot_id
+            # scheme, which no longer exists now that every file emits a
+            # single "file:{sequence}" shot).
+            self.assertEqual("file:1", result.shots[0].shot_id)
+
+    def test_movie_settles_to_moved_subject_before_exact_hold(self):
+        movie_config, _, _ = load_configuration(RuntimeParams(mode="movie"))
+        movie_config["selection"]["min_track_hits"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "continuous.avi")
+            debug_path = str(Path(directory) / "continuous-debug.jsonl")
+            writer = cv2.VideoWriter(
+                path, cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (320, 180)
+            )
+            self.assertTrue(writer.isOpened())
+            for _ in range(120):
+                writer.write(np.zeros((180, 320, 3), dtype=np.uint8))
+            writer.release()
+
+            engine = VerticalFocusEngine(
+                mode="movie",
+                policy_config=movie_config,
+                shots=TagStoreShots([]),
+                progress_log_interval_seconds=10.0,
+                debug_jsonl_path=debug_path,
+                detector=GradualMoveDetector(),
+            )
+            result = engine.process_file(path, 0)
+            engine.close()
+            self.assertEqual(120, sum(len(shot.decisions) for shot in result.shots))
+
+            rows = [
+                json.loads(line)
+                for line in Path(debug_path).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertGreater(rows[-1]["output_x"], 0.60)
+            self.assertEqual("locked", rows[-1]["selected"]["smoothing_regime"])
+            final_values = [row["output_x"] for row in rows[-10:]]
+            self.assertLess(max(final_values) - min(final_values), 1e-9)
 
 
 if __name__ == "__main__":

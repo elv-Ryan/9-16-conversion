@@ -1,0 +1,3 @@
+# License-gated YOLO26 runtime dependency. Do not build, publish, or deploy
+# the container until Eluvio has cleared the applicable Ultralytics terms.
+ultralytics>=8.4.99,<8.5

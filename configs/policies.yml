@@ -1,78 +1,357 @@
-version: 2
-schema_version: vertical_focus_policy_v2
+version: "5.3"
+schema_version: vertical_focus_policy_v5
 
+# Sports is a gameplay-state + ball-continuity controller. Movie is a
+# persistent-character + composition controller. No rule depends on source
+# names, clip timestamps, venues, titles, or fixed screen coordinates.
 policies:
   sports:
     detection:
-      detection_fps: 8.0
-      person_min_score: 0.35
-      ball_min_score: 0.25
-      face_min_score: 0.50
-      max_results: 50
-    tracking:
-      max_missed_updates: 4
-      match_center_distance: 0.18
-      min_iou: 0.03
-      box_alpha: 0.68
-    selection:
-      min_track_hits: 2
-      min_person_area: 0.0025
-      direct_ball_min_area: 0.0040
-      ball_player_radius: 0.22
-      min_ball_player_score: 0.48
-      group_radius: 0.24
-      max_group_size: 3
-      announcer_face_min_area: 0.025
-      min_motion_score: 0.08
-      crowd_min_people: 4
-      crowd_max_median_area: 0.015
-      crowd_max_motion_score: 0.20
-      crowd_group_score: 0.42
-    temporal:
-      min_hold_seconds: 0.55
-      lost_hold_seconds: 0.40
-      switch_margin: 0.13
-      deadband: 0.006
-      response_time_seconds: 0.30
-      max_speed_normalized_per_second: 0.30
-      max_acceleration_normalized_per_second2: 0.95
-    local_shots:
-      histogram_threshold: 0.52
-      minimum_shot_seconds: 0.30
-
-  movie:
-    detection:
-      detection_fps: 8.0
-      person_min_score: 0.35
-      ball_min_score: 0.30
-      face_min_score: 0.45
-      max_results: 40
+      detection_fps: 10.0
+    yolo26:
+      imgsz: 1280
+      pose_imgsz: 960
+      person_confidence: 0.2
+      ball_confidence: 0.06
+      pose_confidence: 0.18
+      keypoint_confidence: 0.25
+      iou: 0.6
+      pose_iou: 0.65
+      max_det: 100
+      pose_max_det: 40
+      end2end: false
+      pose_end2end: false
+      pose_person_rescue: true
+      pose_person_rescue_confidence: 0.24
+      pose_person_rescue_require_head_evidence: true
+      pose_person_rescue_max_area: 0.30
+      pose_person_rescue_max_width: 0.62
+      pose_person_rescue_large_frontal_confidence: 0.50
+      pose_person_rescue_large_frontal_max_area: 0.58
+      pose_person_rescue_large_frontal_max_width: 0.82
+      pose_person_rescue_max_aspect: 1.1
+      pose_person_merge_iou: 0.25
+      pose_person_merge_intersection_over_smaller: 0.65
     tracking:
       max_missed_updates: 5
-      match_center_distance: 0.16
-      min_iou: 0.03
+      ball_max_missed_updates: 4
+      face_max_missed_updates: 2
+      head_max_missed_updates: 2
+      person_max_missed_updates: 5
+      match_center_distance: 0.18
+      ball_match_center_distance: 0.18
+      ball_reacquire_center_distance: 0.28
+      ball_reacquire_min_confidence: 0.55
+      ball_reacquire_min_hits: 2
+      min_iou: 0.02
       box_alpha: 0.70
+      ball_box_alpha: 0.94
+      prediction_max_frames: 8
+      ball_prediction_max_frames: 22
+      prediction_max_distance: 0.1
+      person_box_alpha: 0.84
+      face_box_alpha: 0.86
+      head_box_alpha: 0.84
+      person_velocity_alpha: 0.55
+      face_velocity_alpha: 0.58
+      head_velocity_alpha: 0.55
+      ball_velocity_alpha: 0.68
+    scene_state:
+      gameplay_min_people: 4
+      gameplay_force_people: 7
+      gameplay_min_motion_score: 0.12
+      gameplay_force_min_motion_score: 0.07
+      gameplay_enter_seconds: 0.25
+      live_exit_hold_seconds: 0.8
+      state_persistence_seconds: 0.35
+      replay_max_people: 3
+      replay_min_median_person_area: 0.02
+      replay_max_motion_score: 0.18
+      closeup_max_people: 3
+      closeup_min_person_area: 0.045
+      announcer_max_people: 2
+      announcer_min_person_area: 0.055
+      announcer_min_head_area: 0.02
+      announcer_max_motion_score: 0.08
+      crowd_min_people: 4
+      crowd_max_median_area: 0.015
+      crowd_max_motion_score: 0.1
+      timeout_min_people: 3
+      timeout_max_motion_score: 0.08
+      static_max_motion_score: 0.04
     selection:
-      min_track_hits: 2
-      min_face_area: 0.0015
-      group_score_ratio: 0.72
-      group_crop_width_factor: 1.05
-      min_motion_score: 0.10
+      min_track_hits: 3
+      min_person_area: 0.0025
+      ball_min_track_hits: 2
+      ball_max_misses: 4
+      ball_min_area: 1.0e-05
+      ball_max_area: 0.03
+      ball_continue_confidence: 0.16
+      ball_context_continue_confidence: 0.07
+      ball_continue_distance: 0.12
+      ball_reacquire_distance: 0.18
+      ball_reacquire_gap_seconds: 0.15
+      ball_far_reacquire_min_gap_seconds: 0.2
+      ball_new_context_radius: 0.18
+      ball_new_context_confidence: 0.35
+      ball_new_persistent_confidence: 0.2
+      ball_new_high_confidence: 0.55
+      ball_far_context_confidence: 0.2
+      ball_tight_context_radius: 0.03
+      ball_context_min_area: 0.00015
+      ball_context_min_relative_area: 0.5
+      ball_context_reference_area_cap: 0.0008
+      ball_context_immediate_confidence: 0.3
+      ball_context_two_hit_confidence: 0.12
+      ball_context_max_velocity_per_frame: 0.012
+      ball_persistent_min_area: 7.5e-05
+      ball_low_confidence_context_radius: 0.1
+      ball_low_confidence_min_velocity_per_frame: 0.00035
+      ball_low_confidence_max_velocity_per_frame: 0.06
+      ball_motion_reference_per_frame: 0.006
+      ball_prediction_seconds: 0.20
+      ball_prediction_max_displacement: 0.07
+      ball_forget_seconds: 0.42
+      ball_max_velocity_per_second: 0.9
+      ball_velocity_alpha: 0.45
+      ball_player_radius: 0.18
+      ball_player_context_max_distance: 0.24
+      ball_context_person_max_top: 0.82
+      ball_context_person_max_center_y: 0.90
+      ball_context_person_max_bottom: 0.985
+      ball_context_min_clipped_height: 0.16
+      ball_max_person_area_ratio: 0.18
+      ball_new_max_center_y: 0.92
+      ball_new_max_bottom: 0.985
+      ball_live_max_area: 0.008
+      ball_focus_weight: 0.99
+      ball_context_offset_max: 0.015
+      ball_fast_error_threshold: 0.08
+      ball_fast_min_confidence: 0.55
+      gameplay_cluster_radius: 0.24
+      gameplay_anchor_deadband: 0.06
+      gameplay_anchor_persistence_seconds: 0.3
+      gameplay_anchor_max_step: 0.12
+      ball_anchored_deadband: 0.035
+      ball_anchored_persistence_seconds: 0.12
+      ball_anchored_max_step: 0.16
+      min_motion_score: 0.16
+      ball_lead_min_hits: 3
+      ball_lead_seconds: 0.06
+      ball_lead_max_offset: 0.045
     temporal:
-      min_hold_seconds: 0.85
+      min_hold_seconds: 0.55
+      lost_hold_seconds: 0.45
+      switch_margin: 0.14
+      candidate_persistence_seconds: 0.0
+      hold_last_on_empty: true
+      gameplay_min_hold_seconds: 0.28
+      non_gameplay_min_hold_seconds: 0.7
+      non_gameplay_switch_margin: 0.18
+      non_gameplay_persistence_seconds: 0.35
+      deadband: 0.014
+      response_time_seconds: 0.34
+      target_filter_seconds: 0.14
+      max_speed_normalized_per_second: 0.26
+      max_acceleration_normalized_per_second2: 0.75
+      fast_response_time_seconds: 0.09
+      fast_max_speed_normalized_per_second: 0.72
+      fast_max_acceleration_normalized_per_second2: 3.2
+      fast_error_threshold: 0.08
+      fast_boost_seconds: 0.22
+      fast_on_large_error: false
+      camera_profiles:
+        normal_follow:
+          mode: reframe
+          response_time_seconds: 0.18
+          deadband: 0.008
+          tracking_zone: 0.050
+          target_filter_seconds: 0.0
+          max_speed_normalized_per_second: 0.90
+          max_acceleration_normalized_per_second2: 3.0
+          reframe_min_seconds: 0.18
+          reframe_max_seconds: 0.34
+          reframe_speed_normalized_per_second: 1.25
+          retarget_threshold: 0.080
+          snap_epsilon: 0.004
+        ball_follow:
+          mode: follow
+          response_time_seconds: 0.055
+          deadband: 0.003
+          tracking_zone: 0.006
+          target_filter_seconds: 0.012
+          max_speed_normalized_per_second: 1.55
+          max_acceleration_normalized_per_second2: 6.0
+          retarget_threshold: 0.060
+          snap_epsilon: 0.002
+        fast_reacquire:
+          mode: reframe
+          response_time_seconds: 0.05
+          deadband: 0.003
+          tracking_zone: 0.005
+          target_filter_seconds: 0.0
+          max_speed_normalized_per_second: 2.0
+          max_acceleration_normalized_per_second2: 8.0
+          reframe_min_seconds: 0.16
+          reframe_max_seconds: 0.30
+          reframe_speed_normalized_per_second: 1.85
+          retarget_threshold: 0.100
+          snap_epsilon: 0.002
+    local_shots:
+      histogram_threshold: 0.52
+      gray_mad_threshold: 0.2
+      edge_change_threshold: 0.22
+      alignment_response_threshold: 0.45
+      minimum_shot_seconds: 0.3
+  movie:
+    detection:
+      detection_fps: 10.0
+    yolo26:
+      imgsz: 960
+      pose_imgsz: 960
+      person_confidence: 0.18
+      ball_confidence: 0.08
+      pose_confidence: 0.16
+      keypoint_confidence: 0.22
+      iou: 0.6
+      pose_iou: 0.65
+      max_det: 80
+      pose_max_det: 50
+      end2end: false
+      pose_end2end: false
+      pose_person_rescue: true
+      pose_person_rescue_confidence: 0.24
+      pose_person_rescue_require_head_evidence: true
+      pose_person_rescue_max_area: 0.30
+      pose_person_rescue_max_width: 0.62
+      pose_person_rescue_large_frontal_confidence: 0.50
+      pose_person_rescue_large_frontal_max_area: 0.58
+      pose_person_rescue_large_frontal_max_width: 0.82
+      pose_person_rescue_max_aspect: 1.1
+      pose_person_merge_iou: 0.25
+      pose_person_merge_intersection_over_smaller: 0.65
+    tracking:
+      max_missed_updates: 5
+      face_max_missed_updates: 2
+      head_max_missed_updates: 2
+      person_max_missed_updates: 5
+      match_center_distance: 0.16
+      ball_match_center_distance: 0.18
+      ball_reacquire_center_distance: 0.28
+      ball_reacquire_min_confidence: 0.55
+      ball_reacquire_min_hits: 2
+      min_iou: 0.03
+      box_alpha: 0.7
+      ball_box_alpha: 0.9
+      prediction_max_frames: 5
+      ball_prediction_max_frames: 18
+      prediction_max_distance: 0.05
+      person_box_alpha: 0.80
+      face_box_alpha: 0.84
+      head_box_alpha: 0.82
+      person_velocity_alpha: 0.45
+      face_velocity_alpha: 0.50
+      head_velocity_alpha: 0.45
+    selection:
+      min_track_hits: 3
+      cut_initial_min_track_hits: 1
+      min_person_area: 0.004
+      person_max_misses: 2
+      current_face_min_area: 0.0012
+      new_face_min_area: 0.002
+      small_face_preemption_area: 0.006
+      small_face_min_person_area: 0.03
+      small_background_score_scale: 0.62
+      current_character_bonus: 0.1
+      face_center_weight: 0.30
+      head_center_weight: 0.20
+      orphan_face_min_area: 0.012
+      orphan_face_min_hits: 4
+      group_score_ratio: 0.74
+      group_crop_width_factor: 1.08
+      group_score_bonus: 0.07
+      min_motion_score: 0.16
+      motion_only_without_subjects: true
+      frontal_face_bonus: 0.1
+      person_only_when_face_exists_scale: 0.68
+      head_when_face_exists_scale: 0.82
+      oversized_person_area: 0.18
+      oversized_person_width: 0.62
+      oversized_person_score_scale: 0.35
+      same_character_relink_iou: 0.55
+      same_character_relink_center_distance: 0.045
+      same_character_relink_min_area_ratio: 0.65
+      same_character_relink_max_area_ratio: 1.55
+    temporal:
+      min_hold_seconds: 0.88
       lost_hold_seconds: 0.55
-      switch_margin: 0.17
-      deadband: 0.005
-      response_time_seconds: 0.44
-      max_speed_normalized_per_second: 0.21
-      max_acceleration_normalized_per_second2: 0.58
+      switch_margin: 0.22
+      candidate_persistence_seconds: 0.45
+      hold_last_on_empty: true
+      focus_box_hold_seconds: 0.18
+      cut_initialization_seconds: 0.75
+      new_subject_persistence_seconds: 0.35
+      same_character_switch_margin: 0.08
+      same_character_persistence_seconds: 0.2
+      small_face_switch_margin: 0.3
+      small_face_persistence_seconds: 0.45
+      stable_target_delta: 0.014
+      stable_hold_seconds: 0.2
+      unlock_error: 0.06
+      unlock_persistence_seconds: 0.3
+      deadband: 0.018
+      response_time_seconds: 0.65
+      target_filter_seconds: 0.22
+      max_speed_normalized_per_second: 0.12
+      max_acceleration_normalized_per_second2: 0.25
+      fast_response_time_seconds: 0.3
+      fast_max_speed_normalized_per_second: 0.22
+      fast_max_acceleration_normalized_per_second2: 0.65
+      fast_error_threshold: 0.1
+      fast_boost_seconds: 0.35
+      fast_on_large_error: false
+      strong_face_replacement_delay_seconds: 0.15
+      strong_face_replacement_score_tolerance: 0.05
+      camera_profiles:
+        compose:
+          mode: reframe
+          response_time_seconds: 0.14
+          deadband: 0.008
+          tracking_zone: 0.045
+          target_filter_seconds: 0.0
+          max_speed_normalized_per_second: 0.80
+          max_acceleration_normalized_per_second2: 3.0
+          reframe_min_seconds: 0.18
+          reframe_max_seconds: 0.34
+          reframe_speed_normalized_per_second: 1.20
+          retarget_threshold: 0.080
+          snap_epsilon: 0.004
+        confirmed_reframe:
+          mode: reframe
+          response_time_seconds: 0.10
+          deadband: 0.006
+          tracking_zone: 0.020
+          target_filter_seconds: 0.0
+          max_speed_normalized_per_second: 1.20
+          max_acceleration_normalized_per_second2: 5.0
+          reframe_min_seconds: 0.16
+          reframe_max_seconds: 0.32
+          reframe_speed_normalized_per_second: 1.55
+          retarget_threshold: 0.070
+          snap_epsilon: 0.003
     local_shots:
       histogram_threshold: 0.48
+      gray_mad_threshold: 0.15
+      edge_change_threshold: 0.2
+      alignment_response_threshold: 0.45
+      moderate_histogram_threshold: 0.32
+      moderate_gray_mad_threshold: 0.14
+      moderate_edge_change_threshold: 0.50
+      moderate_alignment_response_threshold: 0.40
       minimum_shot_seconds: 0.24
-
 output:
   vertical_track: vertical_video
   focus_track: focus
   bbox_track: focus_bbox
   coordinate_decimals: 6
-  max_boxes_per_shot: 3
+  max_boxes_per_shot: 5

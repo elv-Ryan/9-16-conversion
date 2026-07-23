@@ -18,7 +18,7 @@ RUN apt-get update \
        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt pyproject.toml setup.py README.md ./
+COPY requirements.txt requirements-yolo26.txt pyproject.toml setup.py README.md ./
 COPY configs ./configs
 COPY models ./models
 COPY src ./src

@@ -1,3 +1,3 @@
-"""Shot-aware 9:16 focus tracking for Eluvio tagger containers."""
+"""Shot-aware YOLO26-only 9:16 focus tracking for Eluvio taggers."""
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
