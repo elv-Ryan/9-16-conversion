@@ -56,9 +56,13 @@ if __name__ == "__main__":
         json.dumps(
             {
                 "mode": runtime.mode,
-                "delegate": runtime.delegate,
+                "detector_backend": runtime.detector_backend,
+                "yolo_detect_model": runtime.yolo_detect_model,
+                "yolo_pose_model": runtime.yolo_pose_model,
+                "yolo_device": runtime.yolo_device,
+                "yolo_imgsz": runtime.yolo_imgsz,
                 "detection_fps": runtime.detection_fps,
-                "face_model": runtime.face_model,
+                "debug_jsonl_path": runtime.debug_jsonl_path,
                 "shot_track": runtime.shot_track,
                 "continue_on_error": True,
             },

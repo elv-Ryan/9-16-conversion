@@ -14,3 +14,23 @@ test-files/*
 *.avi
 *.log
 .DS_Store
+
+models/yolo26/*.pt
+# Local Python environments and caches
+.venv-*/
+venv/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# Local YOLO weights
+# Evaluation inputs and generated outputs
+test-files/
+# Local logs and QA sidecars
+debug/
+metrics/
+# Local transfer and backup files
+*.patch
+*.tgz
+*.tar.gz
+*.sha256

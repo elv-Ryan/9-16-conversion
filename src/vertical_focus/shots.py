@@ -92,17 +92,58 @@ class TagStoreShots:
 
 
 class LocalShotDetector:
-    """Fallback cut detector used only when Tagstore shots are unavailable."""
+    """Fallback hard-cut detector used when Tagstore shots are unavailable.
 
-    def __init__(self, *, threshold: float, minimum_seconds: float, fps: float) -> None:
+    HSV histogram distance remains the primary cue. A conjunctive grayscale
+    mean-absolute-difference and edge-change cue catches same-palette cuts while
+    rejecting most flashes and continuous camera motion.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: float,
+        minimum_seconds: float,
+        fps: float,
+        gray_mad_threshold: float = 0.18,
+        edge_change_threshold: float = 0.20,
+        alignment_response_threshold: float = 0.45,
+        moderate_histogram_threshold: Optional[float] = None,
+        moderate_gray_mad_threshold: float = 0.14,
+        moderate_edge_change_threshold: float = 0.50,
+        moderate_alignment_response_threshold: float = 0.40,
+    ) -> None:
         self.threshold = float(threshold)
+        self.gray_mad_threshold = max(0.0, float(gray_mad_threshold))
+        self.edge_change_threshold = max(0.0, float(edge_change_threshold))
+        self.alignment_response_threshold = min(
+            1.0, max(0.0, float(alignment_response_threshold))
+        )
+        self.moderate_histogram_threshold = (
+            None
+            if moderate_histogram_threshold is None
+            else max(0.0, float(moderate_histogram_threshold))
+        )
+        self.moderate_gray_mad_threshold = max(
+            0.0, float(moderate_gray_mad_threshold)
+        )
+        self.moderate_edge_change_threshold = max(
+            0.0, float(moderate_edge_change_threshold)
+        )
+        self.moderate_alignment_response_threshold = min(
+            1.0, max(0.0, float(moderate_alignment_response_threshold))
+        )
         self.minimum_frames = max(1, int(round(float(minimum_seconds) * fps)))
         self._previous_hist: Optional[np.ndarray] = None
+        self._previous_gray: Optional[np.ndarray] = None
+        self._previous_edges: Optional[np.ndarray] = None
         self._last_cut_frame = 0
         self.shot_index = 0
 
     def reset(self) -> None:
         self._previous_hist = None
+        self._previous_gray = None
+        self._previous_edges = None
         self._last_cut_frame = 0
         self.shot_index = 0
 
@@ -111,12 +152,53 @@ class LocalShotDetector:
         hsv = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)
         hist = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
         cv2.normalize(hist, hist)
+        gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 72, 144)
+
         if self._previous_hist is None:
             self._previous_hist = hist
+            self._previous_gray = gray
+            self._previous_edges = edges
             return False
-        distance = cv2.compareHist(self._previous_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
+
+        histogram_distance = cv2.compareHist(
+            self._previous_hist, hist, cv2.HISTCMP_BHATTACHARYYA
+        )
+        assert self._previous_gray is not None
+        assert self._previous_edges is not None
+        gray_mad = float(np.mean(cv2.absdiff(self._previous_gray, gray))) / 255.0
+        previous_edge_mask = self._previous_edges > 0
+        edge_mask = edges > 0
+        edge_union = int(np.count_nonzero(previous_edge_mask | edge_mask))
+        edge_disagreement = int(np.count_nonzero(previous_edge_mask ^ edge_mask))
+        edge_change = edge_disagreement / max(1, edge_union)
+        _, alignment_response = cv2.phaseCorrelate(
+            self._previous_gray.astype(np.float32), gray.astype(np.float32)
+        )
+
         self._previous_hist = hist
-        if distance >= self.threshold and frame_idx - self._last_cut_frame >= self.minimum_frames:
+        self._previous_gray = gray
+        self._previous_edges = edges
+
+        enough_spacing = frame_idx - self._last_cut_frame >= self.minimum_frames
+        secondary_cut = (
+            gray_mad >= self.gray_mad_threshold
+            and edge_change >= self.edge_change_threshold
+            and alignment_response <= self.alignment_response_threshold
+        )
+        moderate_cut = (
+            self.moderate_histogram_threshold is not None
+            and histogram_distance >= self.moderate_histogram_threshold
+            and gray_mad >= self.moderate_gray_mad_threshold
+            and edge_change >= self.moderate_edge_change_threshold
+            and alignment_response
+            <= self.moderate_alignment_response_threshold
+        )
+        if enough_spacing and (
+            histogram_distance >= self.threshold
+            or secondary_cut
+            or moderate_cut
+        ):
             self._last_cut_frame = frame_idx
             self.shot_index += 1
             return True

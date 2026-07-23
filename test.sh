@@ -46,7 +46,7 @@ printf '%s' "$INPUT" | podman run --rm -i \
   --network=host \
   "$IMAGE_NAME:latest" \
   --output-path /elv/tags/out.jsonl \
-  --params "{\"continue_on_error\":true,\"delegate\":\"cpu\",\"mode\":\"${MODE}\"}"
+  --params "{\"continue_on_error\":true,\"detector_backend\":\"yolo26\",\"mode\":\"${MODE}\"}"
 
 if [ ! -f "$OUTPUT_FILE" ]; then
   echo "Container test failed: $OUTPUT_FILE was not created"

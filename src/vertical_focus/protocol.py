@@ -33,8 +33,16 @@ class VerticalFocusProducer(TagMessageProducer):
             object_model=runtime.object_model,
             face_model=runtime.face_model,
             delegate=runtime.delegate,
+            detector_backend=runtime.detector_backend,
+            yolo_detect_model=runtime.yolo_detect_model,
+            yolo_pose_model=runtime.yolo_pose_model,
+            yolo_device=runtime.yolo_device,
+            yolo_imgsz=runtime.yolo_imgsz,
+            yolo_half=runtime.yolo_half,
+            yolo_end2end=runtime.yolo_end2end,
             shots=self.shots,
             progress_log_interval_seconds=runtime.progress_log_interval_seconds,
+            debug_jsonl_path=runtime.debug_jsonl_path,
         )
         self.content_offset_ms = int(runtime.initial_content_offset_ms)
 
