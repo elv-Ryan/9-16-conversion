@@ -17,3 +17,8 @@ models/**/*.pt
 !models/**/model_manifest.json
 
 test-runs/
+
+# Deployment-pinned NBA Student artifact
+!models/nba_yolo_student/
+!models/nba_yolo_student/best.pt
+!models/nba_yolo_student/*.json
