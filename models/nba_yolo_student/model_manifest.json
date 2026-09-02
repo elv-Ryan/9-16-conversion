@@ -1,0 +1,16 @@
+{
+  "schema_version": "eluvio.nba-yolo-model-artifact.v1",
+  "artifact_version": "round00_fp32_6gpu_v7",
+  "source_checkpoint": "/home/mltrain/elv-ryan/projects/9-16-conversion-ryan-v2.1-student-mvp/output/generic_basketball_v11_student_round00_v1/yolo_fp32_6gpu_round00_v7/long_run/focus_target_round00_fp32/weights/best.pt",
+  "sha256": "e1f498b0447f77c30d2b82210367b556d5f649caeee370f5fd3d20f7a0fec770",
+  "bytes": 20381637,
+  "class_names": [
+    "active_speaker",
+    "gameplay_follow",
+    "graphic_text_lock",
+    "person_subject",
+    "safe_center",
+    "split_screen",
+    "static_composition"
+  ]
+}
