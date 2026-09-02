@@ -1,12 +1,11 @@
-# YOLO26 v5 licensing gate
+# Experimental dependency / licensing notice
 
-This worktree is a technical evaluation. Do not build, publish, merge into a
-production image, or deploy it to Content Fabric until Eluvio confirms the
-applicable Ultralytics commercial license or elects to comply with AGPL-3.0.
+This repository is an experimental Eluvio NBA YOLO shot-to-X tagger and uses
+Ultralytics software/model-loading APIs as a runtime dependency.
 
-The runtime is YOLO26-only:
+Before distributing or deploying this image outside an approved development
+environment, confirm that the intended use, redistribution, and commercial
+deployment are covered by the applicable Ultralytics license and by Eluvio's
+internal dependency-approval policy.
 
-- `yolo26s.pt` supplies COCO person and sports-ball detections.
-- `yolo26n-pose.pt` supplies person pose and pose-derived frontal-face/head evidence.
-- Eluvio's tracker, separate sports/movie policies, smoother, and common-ml JSONL contract remain in place.
-- There is no MediaPipe detector, dependency, import, or fallback path.
+This notice is operational documentation only and is not legal advice.

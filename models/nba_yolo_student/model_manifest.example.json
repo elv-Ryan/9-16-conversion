@@ -1,0 +1,16 @@
+{
+  "schema_version": "eluvio.nba-yolo-model-artifact.v1",
+  "artifact_version": "round00_fp32_6gpu_v7",
+  "source_checkpoint": "/remote/path/to/best.pt",
+  "sha256": "REPLACE_AFTER_COPY",
+  "bytes": 0,
+  "class_names": [
+    "active_speaker",
+    "gameplay_follow",
+    "graphic_text_lock",
+    "person_subject",
+    "safe_center",
+    "split_screen",
+    "static_composition"
+  ]
+}

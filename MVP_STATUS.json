@@ -1,0 +1,29 @@
+{
+  "schema_version": "eluvio.nba-yolo-handoff-status.v3.2",
+  "release": "v3.2-handoff",
+  "model_sha256": "e1f498b0447f77c30d2b82210367b556d5f649caeee370f5fd3d20f7a0fec770",
+  "runtime_families": [
+    "active_speaker",
+    "gameplay_follow",
+    "graphic_text_lock",
+    "person_subject",
+    "safe_center",
+    "split_screen",
+    "static_composition"
+  ],
+  "verified": {
+    "python_unit_tests_local": "PASS_20",
+    "real_ai03_podman_image_build_v3_1": "PASS",
+    "real_ai03_model_sha_gate_v3_1": "PASS",
+    "real_joe_three_shot_smoke_v3_1": "PASS_3_OF_3_ZERO_ERRORS",
+    "joe_518_exact_ordinal_coverage": "PASS_0_THROUGH_517"
+  },
+  "pending": [
+    "single_container_518_shot_run_complete_and_validate",
+    "v3_2_standard_buildscripts_build_on_git_checkout",
+    "v3_2_black_box_podman_contract_test_on_git_checkout",
+    "github_push",
+    "targeted_human_editorial_review",
+    "approved_registry_deploy"
+  ]
+}

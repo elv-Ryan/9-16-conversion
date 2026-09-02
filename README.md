@@ -1,152 +1,172 @@
-# Eluvio YOLO26 Vertical Focus v5
+# Eluvio NBA YOLO shot-to-X tagger — v3.3 handoff
 
-This repository emits a shot-aware horizontal center trajectory for a fixed
-9:16 crop. The runtime is YOLO26-only and preserves the existing Eluvio
-`common-ml` protocol.
+YOLO-only Eluvio tagger MVP for already-segmented NBA shots.
 
-## Runtime
-
-The detector components are:
-
-- `yolo26s.pt` for COCO `person` and `sports ball` detections.
-- `yolo26n-pose.pt` for person detections and pose-derived face/head evidence.
-
-There is no MediaPipe inference, import, dependency, or fallback. YOLO model
-loading remains lazy so deterministic tests can inject a fake detector.
-
-The default model paths are:
+## Production contract
 
 ```text
-/elv/model/models/yolo26/yolo26s.pt
-/elv/model/models/yolo26/yolo26n-pose.pt
+one shot file on stdin
+  -> one custom seven-family NBA YOLO Student
+  -> shot family + semantic focus bbox
+  -> full-shot horizontal trajectory controller
+  -> normalized source-frame X trajectory
+  -> Eluvio tag JSONL + terminal progress
 ```
 
-## Policy separation
+Production runtime does **not** use Qwen, shot detection, a second YOLO pass,
+vertical rendering, or video encoding.
 
-`SportsFocusPolicy` is a gameplay-state controller. It prioritizes a trusted
-observed ball, then a bounded predicted ball during a short miss, then
-ball-anchored local action. Non-gameplay states use separate close-up,
-announcer/studio, timeout/bench, crowd/idle, graphic/static, and weak-evidence
-behavior. A person or group cannot override trusted ball evidence.
+The primary output track is `vertical_video`. The tag's
+`additional_info["x-coordinates"]` contains exactly one legal normalized crop
+center per source frame.
 
-`MovieFocusPolicy` is a persistent-character and composition controller. It
-pairs frontal face/head evidence to an enclosing person, preserves character
-identity during temporary face loss, suppresses small background evidence,
-anchors interaction-group identity to the dominant character, and holds exact
-composition when evidence does not justify movement.
+## Runtime families
 
-Neither policy contains source names, clip timestamps, venue/title rules, or
-fixed coordinates from an evaluation clip. Configuration is in
-`configs/policies.yml`.
+- `active_speaker`
+- `gameplay_follow`
+- `graphic_text_lock`
+- `person_subject`
+- `safe_center`
+- `split_screen`
+- `static_composition`
 
-## Output contract
+The current checkpoint does not expose the finer Category-Gold taxonomy as a
+separate head. `category` is therefore the coarse policy mapping of the runtime
+family.
 
-The model emits only these tracks:
+## Eluvio protocol implementation
 
-```text
-vertical_video
-focus
-focus_bbox
-```
+The entrypoint delegates the daemon/protocol machinery to current pinned
+`common-ml`:
 
-The `vertical_video` tag contains one normalized horizontal center per output
-frame:
+- `catch_errors()`
+- `get_params()`
+- `TagMessageProducer`
+- `Tag`, `Progress`, `Error`, `FrameInfo`
+- `run_default(...)`
+
+`ProgressRatio` is supported by the pinned `common-ml`, but it is disabled by
+default because the current `elv-ml` protocol document explicitly documents
+`tag`, `progress`, and `error` as the protocol message types. Runtime progress
+is available in logs/test-controller status without requiring the extension.
+
+See:
+
+- `docs/ELUVIO_COMPLIANCE_CHECKLIST.md`
+- `docs/ELUVIO_TAGGER_AUDIT.md`
+- `docs/OUTPUT_CONTRACT.md`
+
+## Runtime parameters
 
 ```json
 {
-  "frame_info": {"frame_idx": 0},
-  "additional_info": {"x-coordinates": [0.5, 0.5, 0.51]}
+  "device": "0",
+  "imgsz": 1280,
+  "inference_fps": 10.0,
+  "batch_size": 8,
+  "use_fp16": true,
+  "input_mode": "shot_file",
+  "output_track": "vertical_video",
+  "include_focus_samples": true,
+  "emit_focus_track": false,
+  "emit_progress_ratio": false,
+  "continue_on_error": true
 }
 ```
 
-The implementation does not emit Y movement, zoom, or image-compression
-instructions. Shot-level JSONL remains compact. A terminal `Progress` message
-is emitted after all tags for each successful input; errors continue through
-`common-ml`.
+Backup externally supplied shot intervals are supported with
+`input_mode=shot_manifest`; the container still does not detect shots itself.
 
-## Local setup
-
-YOLO26 use is license-gated. Read `EXPERIMENTAL_LICENSE_NOTICE.md` before
-building or distributing anything.
+## Clone / model / build
 
 ```bash
-./scripts/setup_yolo26_experiment.sh /path/to/checkout
+git clone --recurse-submodules git@github.com:elv-Ryan/9-16-conversion.git
+cd 9-16-conversion
+git checkout nba-yolo-shot-tagger-v3.3
+git submodule update --init --recursive
+
+./scripts/fetch_current_model.sh
+make unit-test
+make build
 ```
 
-That script creates `.venv-yolo26`, installs the pinned dependencies, and
-places the two YOLO weights under `models/yolo26/`.
+`best.pt` is intentionally not committed. `model_manifest.json` is committed and
+pins its SHA-256. On AI-03, `fetch_current_model.sh` copies the trusted checkpoint
+locally. Elsewhere it can fetch it over SSH using `REMOTE`, `SSH_PORT`, and
+`MODEL_SOURCE`.
 
-## Tests
+## Black-box Podman test
 
 ```bash
-PYTHONPATH=src pytest -q
+DEVICE=2 IMAGE=nba-yolo-shot-tagger:latest \
+  ./scripts/test_podman_shot.sh /absolute/path/to/one-shot.mp4
 ```
 
-The suite covers protocol serialization, YOLO-only configuration, pose-derived
-frontal/nonfrontal evidence, predicted-position tracking, sports ball trust and
-scene state, movie character persistence/background suppression, shot cues,
-and smoothing holds.
+The test requires a successful `vertical_video` tag, one X per source frame,
+legal normalized crop centers, and exactly one terminal `Progress` message.
 
-## Visual evaluation
+## Standard Eluvio buildscripts
 
-Place any number of clips matching `sports_*.mp4` and `movie_*.mp4` in the
-short-clips directory, then run:
+The repository includes the normal `qluvio/buildscripts` submodule and
+`Makefile.tagger-model` integration. `build.sh` calls
+`buildscripts/build_container.bash`, so normal build metadata/annotations are
+added by the Eluvio build tooling. The release helper also prepares `test-files/`
+and runs the unmodified official `make test` before the stricter X-semantic
+black-box test and GitHub push.
+
+Typical targets:
 
 ```bash
-SHORTS_DIR=/path/to/short \
-OUT_DIR=test-output/visual-v5-yolo26 \
-./scripts/run_visual_test_yolo26.sh
+make build
+make test
+make deploy
 ```
 
-The runner produces:
+`make deploy` should only be used after the repository is clean, the model
+artifact is present, the Podman test passes, and registry authentication is
+configured.
+
+## Joe 518-shot qualification
+
+Source corpus on AI-03:
 
 ```text
-sports.jsonl
-movie.jsonl
-sports.log
-movie.log
-previews/*_side_by_side.mp4
-previews/*_vertical.mp4
-debug/sports_frames.jsonl
-debug/movie_frames.jsonl
-metrics/trajectory_by_clip.csv
-metrics/trajectory_by_shot.csv
-metrics/detection_summary.json
-metrics/track_continuity.json
-metrics/focus_label_summary.json
-metrics/acceptance_report.md
+/home/mltrain/elv-joe/shots/iq__2q6ZyYAmFfKDBJeWMGsWLP549twd
 ```
 
-The debug sidecars are QA-only and do not alter the common-ml output. The
-side-by-side renderer uses frame-level sidecar labels when present and marks the
-fallback overlay as shot-dominant when not present. Both preview variants map
-source audio into the output. The runner verifies audio streams, dimensions,
-frame counts, and duration within one source frame for every preview pair.
+The real v3.1 image has already passed a three-shot, zero-error Podman smoke on
+this corpus. A full single-container 518-shot run is used to qualify actual
+Eluvio-like long-lived behavior and measure single-container throughput.
 
-The existing clips are regression examples rather than the sole tuning set.
-Use the source-level development/holdout procedure in
-`docs/V5_GENERALIZATION_TEST_PLAN.md` when adding evaluation videos.
+For faster corpus-only qualification, `scripts/parallel_joe518_qualify.py` may
+run independent shot shards on multiple genuinely free GPUs. That result is
+**not** a substitute for the single-container latency/throughput measurement;
+it is only a faster corpus correctness gate.
 
-## Main runtime parameters
+## Model currently pinned
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `mode` | `movie` | Exactly `sports` or `movie`. |
-| `detector_backend` | `yolo26` | Only accepted value. |
-| `yolo_detect_model` | `.../yolo26s.pt` | Object model path. |
-| `yolo_pose_model` | `.../yolo26n-pose.pt` | Pose model path. |
-| `yolo_device` | `0` | CUDA index or `cpu`. |
-| `yolo_imgsz` | policy value | Optional object-model image-size override. |
-| `yolo_half` | `true` | FP16 on non-CPU devices. |
-| `detection_fps` | policy value | Optional cadence override. |
-| `debug_jsonl_path` | empty | Optional QA frame-sidecar path. |
+Trusted checkpoint source on AI-03:
 
-Legacy `object_model`, `face_model`, and `delegate` fields are accepted only to
-avoid breaking existing request envelopes. They are inert and cannot enable an
-alternate detector.
+```text
+/home/mltrain/elv-ryan/projects/9-16-conversion-ryan-v2.1-student-mvp/output/
+generic_basketball_v11_student_round00_v1/yolo_fp32_6gpu_round00_v7/long_run/
+focus_target_round00_fp32/weights/best.pt
+```
 
-## Deployment boundary
+Current verified SHA-256 from the v3.1 image build:
 
-Do not commit, push, build/publish a container, or deploy this branch until the
-code diff, tests, real-video previews, metrics, and the YOLO/Ultralytics license
-have been reviewed explicitly.
+```text
+e1f498b0447f77c30d2b82210367b556d5f649caeee370f5fd3d20f7a0fec770
+```
+
+Replace the checkpoint later only after a newer Student champion passes the same
+seven-class artifact, protocol, Podman, and corpus gates.
+
+
+## Output consumed by the renderer
+
+The Fabric-facing file is JSONL, as required by the Tagger protocol. For each
+shot, the renderer consumes `data.additional_info["x-coordinates"]`: one
+normalized source-width horizontal crop center per source frame. Other fields
+are diagnostic/routing metadata and do not change the X contract. The local
+`x-output.json` helper is a convenience export, not the Fabric wire format.

@@ -1,36 +1,19 @@
 .venv/
 __pycache__/
-*.pyc
-.pytest_cache/
-.cache/
-version/
-test-output/
-test-files/*
-!test-files/.gitkeep
-*.mp4
-*.mov
-*.m4v
-*.mkv
-*.avi
-*.log
-.DS_Store
-
-models/yolo26/*.pt
-# Local Python environments and caches
-.venv-*/
-venv/
 *.py[cod]
-.mypy_cache/
-.ruff_cache/
+.pytest_cache/
 *.egg-info/
-# Local YOLO weights
-# Evaluation inputs and generated outputs
-test-files/
-# Local logs and QA sidecars
-debug/
-metrics/
-# Local transfer and backup files
-*.patch
-*.tgz
-*.tar.gz
-*.sha256
+dist/
+build/
+output/
+data/
+*.jsonl
+*.mp4
+*.mkv
+*.mov
+models/**/*.pt
+!models/**/.gitkeep
+!models/**/README.md
+!models/**/model_manifest.json
+
+test-runs/

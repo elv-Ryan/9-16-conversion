@@ -1,15 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[project]
-name = "eluvio-vertical-focus"
-version = "0.4.0"
-description = "Eluvio shot-aware sports/movie 9:16 focus tracker"
-requires-python = ">=3.10"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

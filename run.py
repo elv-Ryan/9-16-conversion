@@ -8,65 +8,65 @@ from loguru import logger
 
 from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
-from vertical_focus.config import runtime_params_from_dict
-from vertical_focus.protocol import VerticalFocusProducer
+from nba_yolo_shot_tagger.config import config_from_params
+from nba_yolo_shot_tagger.producer import NbaShotFocusProducer
 
 
-def _load_params() -> Dict[str, Any]:
-    params = get_params()
-    if not isinstance(params, dict):
-        raise ValueError("--params must be a JSON object")
-    return dict(params)
-
-
-def _force_continue_on_error(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep the long-lived tagger alive after one malformed input."""
-    effective = dict(params)
-    effective["continue_on_error"] = True
-    encoded = json.dumps(effective, separators=(",", ":"), sort_keys=True)
+def _replace_params_argument(params: Dict[str, Any]) -> None:
+    encoded = json.dumps(params, separators=(",", ":"), sort_keys=True)
     rewritten = []
-    found = False
     index = 0
+    found = False
     while index < len(sys.argv):
-        arg = sys.argv[index]
-        if arg == "--params":
+        argument = sys.argv[index]
+        if argument == "--params":
             rewritten.extend(["--params", encoded])
-            found = True
             index += 2
-            continue
-        if arg.startswith("--params="):
-            rewritten.append(f"--params={encoded}")
             found = True
-            index += 1
             continue
-        rewritten.append(arg)
+        if argument.startswith("--params="):
+            rewritten.append(f"--params={encoded}")
+            index += 1
+            found = True
+            continue
+        rewritten.append(argument)
         index += 1
     if not found:
         rewritten.extend(["--params", encoded])
     sys.argv[:] = rewritten
-    return effective
 
 
-if __name__ == "__main__":
+def main() -> None:
     catch_errors()
-    params = _force_continue_on_error(_load_params())
-    runtime = runtime_params_from_dict(params)
+    params = get_params()
+    if not isinstance(params, dict):
+        raise ValueError("--params must decode to a JSON object")
+
+    # The production container is long-lived: one malformed shot must not end
+    # the daemon. Respect an explicit caller setting, otherwise default true.
+    effective = dict(params)
+    effective.setdefault("continue_on_error", True)
+    _replace_params_argument(effective)
+
+    config = config_from_params(effective)
     logger.info(
-        "vertical focus runtime: {}",
+        "NBA YOLO shot tagger starting: {}",
         json.dumps(
             {
-                "mode": runtime.mode,
-                "detector_backend": runtime.detector_backend,
-                "yolo_detect_model": runtime.yolo_detect_model,
-                "yolo_pose_model": runtime.yolo_pose_model,
-                "yolo_device": runtime.yolo_device,
-                "yolo_imgsz": runtime.yolo_imgsz,
-                "detection_fps": runtime.detection_fps,
-                "debug_jsonl_path": runtime.debug_jsonl_path,
-                "shot_track": runtime.shot_track,
-                "continue_on_error": True,
+                "input_mode": config.input_mode,
+                "model_path": config.model_path,
+                "device": config.device,
+                "imgsz": config.imgsz,
+                "inference_fps": config.inference_fps,
+                "batch_size": config.batch_size,
+                "output_track": config.output_track,
+                "continue_on_error": effective["continue_on_error"],
             },
             sort_keys=True,
         ),
     )
-    run_default(VerticalFocusProducer(runtime), batch_limit=1)
+    run_default(NbaShotFocusProducer(config), batch_limit=1)
+
+
+if __name__ == "__main__":
+    main()

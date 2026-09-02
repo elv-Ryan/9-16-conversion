@@ -1,0 +1,11 @@
+reference_materials:
+  source_priority:
+    - https://github.com/qluvio/elv-ml/blob/main/docs/tagger/tag-container-impl-guide.md
+    - https://github.com/qluvio/elv-ml/blob/main/docs/tagger/tag-container-protocol.md
+    - https://github.com/eluv-io/common-ml
+    - https://github.com/qluvio/buildscripts
+    - practical_deployed_examples
+  notes:
+    - Current elv-ml docs override archived or deployed examples on conflict.
+    - common-ml supplies the stdin daemon and JSONL protocol loop.
+    - The production MVP accepts already-segmented shots; it does not run shot detection.

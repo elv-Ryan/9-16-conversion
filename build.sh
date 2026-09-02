@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-git submodule update --init --recursive
-export TITLE="vertical-focus"
-export DESCRIPTION="Eluvio shot-aware sports/movie 9:16 focus tracker"
-
-exec buildscripts/build_container.bash -t "verticalvideo:${IMAGE_TAG:-latest}" -f Containerfile . "$@"
+set -Eeuo pipefail
+export TITLE="NBA YOLO Shot Focus"
+export DESCRIPTION="Eluvio shot-in NBA YOLO family/focus tagger emitting normalized horizontal X trajectories."
+exec buildscripts/build_container.bash \
+  -t "nba-yolo-shot-tagger:${IMAGE_TAG:-latest}" \
+  -f Containerfile \
+  .
