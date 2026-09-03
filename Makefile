@@ -1,4 +1,4 @@
-IMAGE_NAME := nba-yolo-shot-tagger
+IMAGE_NAME := verticalvideo-v2
 PYTHON ?= python3
 
 include buildscripts/Makefile.tagger-model
