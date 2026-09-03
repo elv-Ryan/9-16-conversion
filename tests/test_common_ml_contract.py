@@ -123,6 +123,19 @@ class ContractIntegrationTests(unittest.TestCase):
         self.assertEqual(tag.end_time, 50)
         self.assertEqual(tag.additional_info["x-coordinates"], [0.5, 0.55, 0.6])
         self.assertEqual(tag.additional_info["x_coordinate_alignment"], "source_frame")
+        self.assertEqual(tag.frame_info, {"frame_idx": 0})
+        self.assertNotIn("focus_samples", tag.additional_info)
+        self.assertEqual(tag.additional_info["focus_sample_fps"], 10.0)
+
+    def test_include_focus_samples_is_opt_in(self):
+        tags = tags_for_analysis(
+            self.analysis(),
+            RuntimeConfig(verify_model_sha256=False, include_focus_samples=True),
+        )
+        tag = tags[0]
+        self.assertIn("focus_samples", tag.additional_info)
+        self.assertEqual(len(tag.additional_info["focus_samples"]), 1)
+        self.assertEqual(tag.additional_info["focus_sample_fps"], 10.0)
 
     def test_producer_emits_terminal_progress(self):
         class FakeService:
