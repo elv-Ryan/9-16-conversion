@@ -36,7 +36,7 @@ class RuntimeConfig:
     output_track: str = "vertical_video"
     focus_track: str = "focus"
     emit_focus_track: bool = False
-    include_focus_samples: bool = True
+    include_focus_samples: bool = False
     coordinate_decimals: int = 6
     target_aspect_width_over_height: float = 9.0 / 16.0
 
