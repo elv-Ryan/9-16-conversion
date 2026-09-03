@@ -163,6 +163,9 @@ class ShotFocusService:
             inference_fps=self.config.inference_fps,
             batch_size=self.config.batch_size,
         ):
+            print("infer batch size", len(frame_indices))
+            if len(frame_indices) > 0: print("frame[0]", frame_indices[0])
+
             evidence.extend(
                 self.model.infer_batch(
                     frame_indices=frame_indices,
@@ -174,6 +177,7 @@ class ShotFocusService:
             raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
 
         family, family_confidence = self._family_vote(evidence)
+        print("family, confidence", family, family_confidence)
         focus_samples: List[FocusSample] = []
         raw_x: List[Optional[float]] = []
         confidences: List[float] = []
