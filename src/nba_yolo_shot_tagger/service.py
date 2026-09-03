@@ -176,7 +176,13 @@ class ShotFocusService:
         if not evidence:
             raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
 
-        family, family_confidence = self._family_vote(evidence)
+        family_determination_cutoff_frame = start_frame + int(
+            round(self.config.family_determination_max_seconds * video.info.fps)
+        )
+        family_vote_evidence = [
+            frame for frame in evidence if frame.frame_index < family_determination_cutoff_frame
+        ] or evidence
+        family, family_confidence = self._family_vote(family_vote_evidence)
         print("family, confidence", family, family_confidence)
         focus_samples: List[FocusSample] = []
         raw_x: List[Optional[float]] = []

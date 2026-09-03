@@ -33,6 +33,7 @@ class RuntimeConfig:
     input_mode: str = "shot_file"
     shot_manifest_path: str = ""
     max_shot_seconds: float = 900.0
+    family_determination_max_seconds: float = 2.0
 
     output_track: str = "vertical_video"
     focus_track: str = "focus"
@@ -95,6 +96,7 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
         "inference_fps",
         "min_detection_confidence",
         "max_shot_seconds",
+        "family_determination_max_seconds",
         "target_aspect_width_over_height",
     }
 
@@ -127,6 +129,8 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("min_detection_confidence must be in [0, 1)")
     if not (0.1 <= config.max_shot_seconds <= 7200.0):
         raise ValueError("max_shot_seconds must be between 0.1 and 7200")
+    if not (0.1 <= config.family_determination_max_seconds <= 7200.0):
+        raise ValueError("family_determination_max_seconds must be between 0.1 and 7200")
     if not (0.05 <= config.target_aspect_width_over_height <= 2.0):
         raise ValueError("target_aspect_width_over_height is invalid")
     if not (0 <= config.coordinate_decimals <= 9):
