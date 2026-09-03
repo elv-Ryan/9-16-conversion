@@ -67,7 +67,7 @@ See:
   "use_fp16": true,
   "input_mode": "shot_file",
   "output_track": "vertical_video",
-  "include_focus_samples": true,
+  "include_focus_samples": false,
   "emit_focus_track": false,
   "emit_progress_ratio": false,
   "continue_on_error": true

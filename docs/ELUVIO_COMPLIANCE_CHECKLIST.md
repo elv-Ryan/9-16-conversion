@@ -24,7 +24,7 @@ Authority order used for this checklist:
 | `source_media` equals the exact input path | PASS | producer propagates stdin path unchanged |
 | times are integer milliseconds | PASS | shot/source-relative `start_time` / `end_time` |
 | optional `additional_info` | PASS | X trajectory + family/model metadata |
-| optional `frame_info` | PASS | used only on optional focus track |
+| optional `frame_info` | PASS | `{"frame_idx": ...}` on every tag; adds `box` on the optional focus track when a representative detection exists |
 | uncaught setup errors reach Tagger | PASS | `catch_errors()` installed before config/model init |
 | per-file inference errors can continue | PASS | source-scoped `Error`; `continue_on_error` defaults true |
 

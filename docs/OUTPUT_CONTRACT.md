@@ -16,6 +16,7 @@ legal normalized horizontal crop center for every source frame in the shot.
     "start_time": 0,
     "end_time": 4000,
     "source_media": "/elv/input/shot.mp4",
+    "frame_info": {"frame_idx": 0},
     "additional_info": {
       "schema_version": "eluvio.nba-yolo-shot-x.v1",
       "shot_id": "shot_000000",
@@ -31,7 +32,8 @@ legal normalized horizontal crop center for every source frame in the shot.
       "crop_width_norm": 0.316406,
       "legal_x_center_min": 0.158203,
       "legal_x_center_max": 0.841797,
-      "x-coordinates": [0.5, 0.501, 0.503]
+      "x-coordinates": [0.5, 0.501, 0.503],
+      "focus_sample_fps": 10.0
     }
   }
 }
@@ -48,6 +50,13 @@ Semantics:
   `source_frame_start + i`.
 - `start_time` and `end_time` are milliseconds relative to this exact
   `source_media` input. There is no cross-file cumulative offset.
+- `frame_info.frame_idx` is `source_frame_start`, present on every tag.
+- `additional_info.focus_sample_fps` is always emitted. The per-frame
+  `additional_info.focus_samples` array (one entry per sampled focus-model
+  frame, at `focus_sample_fps`) is large and is only emitted when the runtime
+  parameter `include_focus_samples` is `true`; it defaults to `false` to keep
+  tag output small. Sampling density is unaffected by this flag — only
+  whether the samples are included in the tag.
 
 The current model has a seven-family runtime head. It does not yet expose the
 fine eleven-way Category-Gold subtype taxonomy as a separately trained head.
