@@ -19,6 +19,14 @@ class RuntimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shot_manifest_path"):
             config_from_params({"input_mode": "shot_manifest"})
 
+    def test_segment_file_input_mode_is_accepted(self):
+        config = config_from_params({"input_mode": "segment_file"})
+        self.assertEqual(config.input_mode, "segment_file")
+
+    def test_unknown_input_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "input_mode"):
+            config_from_params({"input_mode": "not_a_real_mode"})
+
     def test_json_types_are_strict(self):
         with self.assertRaisesRegex(ValueError, "batch_size"):
             config_from_params({"batch_size": "8"})

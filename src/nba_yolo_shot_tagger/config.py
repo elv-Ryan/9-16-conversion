@@ -130,8 +130,8 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("target_aspect_width_over_height is invalid")
     if not (0 <= config.coordinate_decimals <= 9):
         raise ValueError("coordinate_decimals must be between 0 and 9")
-    if config.input_mode not in {"shot_file", "shot_manifest"}:
-        raise ValueError("input_mode must be 'shot_file' or 'shot_manifest'")
+    if config.input_mode not in {"shot_file", "shot_manifest", "segment_file"}:
+        raise ValueError("input_mode must be 'shot_file', 'shot_manifest', or 'segment_file'")
     if config.input_mode == "shot_manifest" and not config.shot_manifest_path:
         raise ValueError("shot_manifest_path is required for input_mode='shot_manifest'")
     if not config.output_track.strip():
