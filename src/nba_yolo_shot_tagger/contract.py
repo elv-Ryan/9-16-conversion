@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Dict, Iterable, List
 
-from common_ml.tagging.messages import FrameInfo, Tag
+from common_ml.tagging.messages import Tag
 
 from .config import RuntimeConfig
 from .types import FocusSample, ShotAnalysis
@@ -92,7 +92,7 @@ def tags_for_analysis(analysis: ShotAnalysis, config: RuntimeConfig) -> List[Tag
         additional_info["focus_samples"] = [
             _focus_sample(sample, decimals) for sample in analysis.focus_samples
         ]
-        additional_info["focus_sample_fps"] = _round(config.inference_fps, decimals)
+    additional_info["focus_sample_fps"] = _round(config.inference_fps, decimals)
 
     tags = [
         Tag(
@@ -101,6 +101,7 @@ def tags_for_analysis(analysis: ShotAnalysis, config: RuntimeConfig) -> List[Tag
             end_time=int(analysis.end_ms),
             source_media=analysis.source_media,
             track=config.output_track,
+            frame_info={"frame_idx": int(analysis.start_frame)},
             additional_info=additional_info,
         )
     ]
@@ -110,18 +111,18 @@ def tags_for_analysis(analysis: ShotAnalysis, config: RuntimeConfig) -> List[Tag
             key=lambda sample: sample.confidence,
             default=None,
         )
-        frame_info = None
+        frame_info = {"frame_idx": int(analysis.start_frame)}
         if representative is not None and representative.bbox is not None:
             x1, y1, x2, y2 = representative.bbox
-            frame_info = FrameInfo(
-                frame_idx=int(representative.frame_index),
-                box={
+            frame_info = {
+                "frame_idx": int(representative.frame_index),
+                "box": {
                     "x1": _round(x1, decimals),
                     "y1": _round(y1, decimals),
                     "x2": _round(x2, decimals),
                     "y2": _round(y2, decimals),
                 },
-            )
+            }
         tags.append(
             Tag(
                 tag=analysis.family,
