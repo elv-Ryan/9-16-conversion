@@ -46,9 +46,9 @@ class ShotDetector(AVModel):
         print(duration_ms)
         cap.release()
 
-        return self.tag_file_given_info(cap, fpath, fps, frame_count, duration_ms)
+        return self.tag_file_given_info(fpath, fps, round(duration_ms))
 
-    def tag_file_given_info(self, fpath: str, fps: float, frame_count:int, duration_ms:int ) -> List[Tag]:
+    def tag_file_given_info(self, fpath: str, fps: float, duration_ms:int ) -> List[Tag]:
         
         frame_time = 1000 / fps
 

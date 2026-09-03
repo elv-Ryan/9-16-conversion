@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 
-DEFAULT_MODEL_PATH = "/elv/model/models/nba_yolo_student/best.pt"
-DEFAULT_MODEL_MANIFEST_PATH = "/elv/model/models/nba_yolo_student/model_manifest.json"
-
+DEFAULT_MODEL_PATH = "models/nba_yolo_student/best.pt"
+DEFAULT_MODEL_MANIFEST_PATH = "models/nba_yolo_student/model_manifest.json"
+DEFAULT_SHOT_MODEL_PATH = "models/shot/transnetv2/torch_transnetv2.pth"
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -20,6 +20,7 @@ class RuntimeConfig:
     """
 
     model_path: str = DEFAULT_MODEL_PATH
+    shot_model_path: str = DEFAULT_SHOT_MODEL_PATH
     model_manifest_path: str = DEFAULT_MODEL_MANIFEST_PATH
     verify_model_sha256: bool = True
     device: str = "0"

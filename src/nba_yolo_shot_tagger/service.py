@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from shot.model import ShotDetector
 
 from .config import RuntimeConfig
 from .model import EXPECTED_FAMILIES, YoloStudentModel
@@ -80,9 +81,32 @@ class ShotFocusService:
         )
         self.manifest = ShotManifest(config.shot_manifest_path) if config.input_mode == "shot_manifest" else None
 
+        if config.input_mode == "segment_file":
+            self.shot_detector = ShotDetector(
+                transnet_path=config.shot_model_path,
+                contiguous=False,  # True,
+            )
+        else:
+            self.shot_detector = None
+
     def intervals_for(self, video: VideoSource) -> List[ShotInterval]:
         if self.manifest is not None:
             return self.manifest.intervals_for(video.path)
+
+        if self.shot_detector is not None:
+            shot_boundaries = self.shot_detector.tag_file_given_info(video.path, video.info.fps, round(video.info.duration_ms))
+            intervals: List[ShotInterval] = []
+
+            for index, interval in enumerate(shot_boundaries):
+                intervals.append(
+                    ShotInterval(
+                        shot_id=f"shot_{index:06d}",
+                        start_ms=interval.start_time,
+                        end_ms=interval.end_time,
+                    )
+                )
+            return intervals
+
         return [
             ShotInterval(
                 shot_id="shot_000000",
@@ -121,6 +145,9 @@ class ShotFocusService:
         return None
 
     def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
+
+
+
         video = VideoSource(source_media)
         analyses: List[ShotAnalysis] = []
         for interval in self.intervals_for(video):
