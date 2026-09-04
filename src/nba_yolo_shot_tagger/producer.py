@@ -40,3 +40,19 @@ class NbaShotFocusProducer(TagMessageProducer):
                     message=f"{type(error).__name__}: {error}",
                     source_media=source_media,
                 )
+
+    def on_completion(self) -> Iterator[Message]:
+        # segment_file mode never has a "next file" to hand a leftover shot
+        # off to; once the input stream is exhausted, flush whatever shot is
+        # still in progress instead of silently dropping it.
+        if self.config.input_mode != "segment_file":
+            return
+        try:
+            analyses = self.service.finalize_segment_stream()
+            for analysis in analyses:
+                yield from tags_for_analysis(analysis, self.config)
+        except Exception as error:
+            logger.opt(exception=error).error(
+                "NBA YOLO shot tagging failed to finalize segment stream"
+            )
+            yield Error(message=f"{type(error).__name__}: {error}")

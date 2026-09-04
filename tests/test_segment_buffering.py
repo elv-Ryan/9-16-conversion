@@ -52,6 +52,11 @@ def _service(family_determination_max_seconds: float) -> ShotFocusService:
     service._segment_shot_index = 0
     service._segment_cumulative_frames = 0
     service._segment_cumulative_ms = 0
+    service._segment_cycle_has_full_file = True
+    service._segment_cycle_start_true_offset_frames = 0
+    service._segment_cycle_start_true_offset_ms = 0
+    service._segment_last_source_media = None
+    service._segment_last_video_info = None
     return service
 
 
@@ -147,6 +152,76 @@ class SegmentBufferingTests(unittest.TestCase):
         service = _service(family_determination_max_seconds=4.0)
         with self.assertRaises(ValueError):
             service._advance_segment_state("empty.mp4", _video_info(), [])
+
+    def test_finalize_stream_with_no_files_processed_is_a_noop(self):
+        service = _service(family_determination_max_seconds=4.0)
+        self.assertEqual(service.finalize_segment_stream(), [])
+
+    def test_finalize_stream_forces_a_vote_mid_family_determination(self):
+        # Only one file arrives, never reaching the 4s threshold, before the
+        # stream ends -- finalize_segment_stream must still emit something.
+        service = _service(family_determination_max_seconds=4.0)
+        service._advance_segment_state("file0.mp4", _video_info(), _evidence())
+        self.assertIsNone(service.segment_family)
+
+        completed = service.finalize_segment_stream()
+        self.assertEqual(len(completed), 1)
+        shot = completed[0]
+        self.assertEqual(shot.family, "gameplay_follow")
+        self.assertEqual(shot.source_media, "file0.mp4")
+        # The whole (only) file belongs to this shot, relative to itself.
+        self.assertEqual(shot.start_frame, 0)
+        self.assertEqual(shot.start_frame + shot.frame_count, FRAME_COUNT)
+        self.assertEqual(service.segment_state, "determining_family")
+
+    def test_finalize_stream_mid_outputting_offset(self):
+        service = _service(family_determination_max_seconds=4.0)
+        service._advance_segment_state("file0.mp4", _video_info(), _evidence())
+        service._advance_segment_state("file1.mp4", _video_info(), _evidence())
+        service._advance_segment_state("file2.mp4", _video_info(), _evidence())
+        service._advance_segment_state("file3.mp4", _video_info(), _evidence())
+        self.assertEqual(service.segment_state, "outputting_offset")
+
+        completed = service.finalize_segment_stream()
+        self.assertEqual(len(completed), 1)
+        shot = completed[0]
+        self.assertEqual(shot.source_media, "file3.mp4")
+        # file0, file1, file2 (3 whole files) precede file3, the reference file.
+        self.assertEqual(shot.start_frame, -FRAME_COUNT * 3)
+        self.assertEqual(shot.start_frame + shot.frame_count, FRAME_COUNT)
+
+    def test_finalize_stream_immediately_after_a_boundary_reseed(self):
+        # Run one full boundary cycle, then end the stream before any further
+        # file arrives for the reseeded cycle.
+        service = _service(family_determination_max_seconds=4.0)
+        for index in range(8):
+            service._advance_segment_state(f"file{index}.mp4", _video_info(), _evidence())
+        self.assertFalse(service._segment_cycle_has_full_file)
+
+        completed = service.finalize_segment_stream()
+        self.assertEqual(len(completed), 1)
+        shot = completed[0]
+        # Same physical file the leftover came from, at its true physical offset.
+        self.assertEqual(shot.source_media, "file7.mp4")
+        self.assertEqual(shot.start_frame, SPLIT_FRAME)
+        self.assertEqual(shot.start_frame + shot.frame_count, FRAME_COUNT)
+        true_indices = list(range(SPLIT_FRAME, FRAME_COUNT, 6))
+        self.assertEqual([sample.frame_index for sample in shot.focus_samples], true_indices)
+
+    def test_finalize_stream_after_reseed_plus_one_more_file(self):
+        service = _service(family_determination_max_seconds=4.0)
+        for index in range(8):
+            service._advance_segment_state(f"file{index}.mp4", _video_info(), _evidence())
+        service._advance_segment_state("file8.mp4", _video_info(), _evidence())
+        self.assertTrue(service._segment_cycle_has_full_file)
+
+        completed = service.finalize_segment_stream()
+        self.assertEqual(len(completed), 1)
+        shot = completed[0]
+        self.assertEqual(shot.source_media, "file8.mp4")
+        # Only the leftover half of file7 (60 frames) precedes file8 here.
+        self.assertEqual(shot.start_frame, -(FRAME_COUNT - SPLIT_FRAME))
+        self.assertEqual(shot.start_frame + shot.frame_count, FRAME_COUNT)
 
 
 if __name__ == "__main__":

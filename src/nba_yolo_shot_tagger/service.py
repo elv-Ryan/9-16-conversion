@@ -122,6 +122,19 @@ class ShotFocusService:
         # processed when the shot concludes (see _finalize_segment_shot).
         self._segment_cumulative_frames = 0
         self._segment_cumulative_ms = 0
+        # Whether an ordinary (whole) file has been folded into the current
+        # cycle yet. False only right after a boundary reseed, until either
+        # another file arrives (cumulative-based shift becomes valid again)
+        # or the stream ends first (finalize_segment_stream needs the exact
+        # physical offset below instead).
+        self._segment_cycle_has_full_file = True
+        self._segment_cycle_start_true_offset_frames = 0
+        self._segment_cycle_start_true_offset_ms = 0
+        # The most recent file seen at all (persists across shot cycles), so
+        # finalize_segment_stream has a source_media/VideoInfo to finish
+        # against once there are no more input files.
+        self._segment_last_source_media: Optional[str] = None
+        self._segment_last_video_info: Optional[VideoInfo] = None
 
     def intervals_for(self, video: VideoSource) -> List[ShotInterval]:
         if self.manifest is not None:
@@ -295,17 +308,24 @@ class ShotFocusService:
         self._segment_files_since_output_began = 0
         self._segment_cumulative_frames = 0
         self._segment_cumulative_ms = 0
+        self._segment_cycle_has_full_file = True
+        self._segment_cycle_start_true_offset_frames = 0
+        self._segment_cycle_start_true_offset_ms = 0
 
     def _finalize_segment_shot(
-        self, *, source_media: str, video_info: VideoInfo, end_frame: int
+        self,
+        *,
+        source_media: str,
+        video_info: VideoInfo,
+        end_frame: int,
+        shift_frames: int,
+        shift_ms: int,
     ) -> ShotAnalysis:
         # Everything buffered so far is relative to the start of the current
         # shot cycle. Re-base it negative, relative to frame 0 of the file
         # being processed right now (the one concluding the shot), by
         # shifting back by however many frames/ms of *earlier* files fed
         # this cycle before it.
-        shift_frames = self._segment_cumulative_frames
-        shift_ms = self._segment_cumulative_ms
         shot_id = f"shot_{self._segment_shot_index:06d}"
         self._segment_shot_index += 1
         sample_frame_indices = [index - shift_frames for index in self.segment_sample_frame_indices]
@@ -352,6 +372,9 @@ class ShotFocusService:
         if not evidence:
             raise ValueError(f"segment {source_media} produced no decodable frames")
 
+        self._segment_last_source_media = source_media
+        self._segment_last_video_info = video_info
+
         # Re-base this file's frame indices/timestamps onto the running,
         # monotonically increasing axis for the current shot cycle (frame 0
         # == the cycle's first file's frame 0), so buffered evidence from
@@ -372,6 +395,7 @@ class ShotFocusService:
             self._segment_buffered_seconds += video_info.duration_ms / 1000.0
             self._segment_cumulative_frames += video_info.frame_count
             self._segment_cumulative_ms += video_info.duration_ms
+            self._segment_cycle_has_full_file = True
             self._try_determine_family()
             return []
 
@@ -381,6 +405,7 @@ class ShotFocusService:
             self._extend_offset_buffers(remapped)
             self._segment_cumulative_frames += video_info.frame_count
             self._segment_cumulative_ms += video_info.duration_ms
+            self._segment_cycle_has_full_file = True
             return []
 
         # Arbitrary placeholder shot boundary: split this file in half.
@@ -390,7 +415,11 @@ class ShotFocusService:
         self._extend_offset_buffers(first_half)
 
         completed = self._finalize_segment_shot(
-            source_media=source_media, video_info=video_info, end_frame=split_frame
+            source_media=source_media,
+            video_info=video_info,
+            end_frame=split_frame,
+            shift_frames=self._segment_cumulative_frames,
+            shift_ms=self._segment_cumulative_ms,
         )
         self._reset_current_segment_shot()
 
@@ -398,6 +427,9 @@ class ShotFocusService:
         # cycle, so the buffer never has to rewind to a file's beginning.
         # The new cycle's reference frame 0 is the leftover's own first
         # frame, so its indices/timestamps are rebased back by split_frame.
+        # Nothing whole has been folded into this fresh cycle yet: remember
+        # the true physical offset in case the stream ends before any other
+        # file arrives (see finalize_segment_stream).
         if second_half:
             split_frame_ms = int(round(1000.0 * split_frame / video_info.fps))
             rebased_second_half = [
@@ -413,8 +445,59 @@ class ShotFocusService:
             self._segment_buffered_seconds += remaining_frames / video_info.fps
             self._segment_cumulative_frames = remaining_frames
             self._segment_cumulative_ms = video_info.duration_ms - split_frame_ms
+            self._segment_cycle_has_full_file = False
+            self._segment_cycle_start_true_offset_frames = split_frame
+            self._segment_cycle_start_true_offset_ms = split_frame_ms
             self._try_determine_family()
 
+        return [completed]
+
+    def finalize_segment_stream(self) -> List[ShotAnalysis]:
+        """Called once there are no more input files, to flush whatever shot
+        is still in progress. There is no next file to hand a leftover
+        remainder to (and no more frames to ever determine a fresh family
+        from), so unlike the arbitrary mid-stream boundary this always
+        consumes everything buffered rather than splitting anything off."""
+        if self._segment_last_video_info is None:
+            return []
+
+        if self.segment_state == "determining_family" and self._segment_evidence_buffer:
+            # Force a vote on whatever was buffered, even though
+            # family_determination_max_seconds was never reached -- there is
+            # no more video coming to wait for.
+            family, family_confidence = self._family_vote(self._segment_evidence_buffer)
+            self.segment_family = family
+            self.segment_family_confidence = family_confidence
+            self._extend_offset_buffers(self._segment_evidence_buffer)
+            self._segment_evidence_buffer = []
+
+        if not self.segment_sample_frame_indices:
+            return []
+
+        video_info = self._segment_last_video_info
+        if self._segment_cycle_has_full_file:
+            # The usual case: at least one whole file was folded into this
+            # cycle since the last reseed, so the running cumulative counters
+            # already exclude the most recent (now-reference) file's own
+            # contribution the same way a normal boundary would.
+            shift_frames = self._segment_cumulative_frames - video_info.frame_count
+            shift_ms = self._segment_cumulative_ms - video_info.duration_ms
+        else:
+            # The stream ended immediately after a boundary reseed, before
+            # any further file arrived: the only data in this cycle is a
+            # tail slice of video_info itself, so the shift is exactly the
+            # true physical offset where that tail slice began.
+            shift_frames = -self._segment_cycle_start_true_offset_frames
+            shift_ms = -self._segment_cycle_start_true_offset_ms
+
+        completed = self._finalize_segment_shot(
+            source_media=self._segment_last_source_media,
+            video_info=video_info,
+            end_frame=video_info.frame_count,
+            shift_frames=shift_frames,
+            shift_ms=shift_ms,
+        )
+        self._reset_current_segment_shot()
         return [completed]
 
     def ingest_segment_file(self, source_media: str) -> List[ShotAnalysis]:
