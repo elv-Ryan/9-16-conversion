@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -12,8 +12,21 @@ from shot.model import ShotDetector
 from .config import RuntimeConfig
 from .model import EXPECTED_FAMILIES, YoloStudentModel
 from .trajectory import expand_to_source_frames, legal_crop_geometry, smooth_samples
-from .types import Candidate, FocusSample, FrameEvidence, ShotAnalysis, ShotInterval
+from .types import (
+    Candidate,
+    FocusSample,
+    FrameEvidence,
+    ShotAnalysis,
+    ShotInterval,
+    VideoInfo,
+)
 from .video import VideoSource
+
+
+# Placeholder until real shot-boundary detection (src/shot) is wired into
+# segment_file mode: pretend a shot boundary falls halfway through this many
+# files after family becomes known.
+_ARBITRARY_SHOT_BOUNDARY_FILE_COUNT = 6
 
 
 CATEGORY_BY_FAMILY = {
@@ -89,6 +102,27 @@ class ShotFocusService:
         else:
             self.shot_detector = None
 
+        # segment_file mode: stateful buffering across incoming ~2s segment
+        # files, until real shot-boundary detection replaces the arbitrary
+        # placeholder boundary below.
+        self.segment_state = "determining_family"
+        self.segment_family: Optional[str] = None
+        self.segment_family_confidence: Optional[float] = None
+        self.segment_raw_x: List[Optional[float]] = []
+        self.segment_confidences: List[float] = []
+        self.segment_sample_frame_indices: List[int] = []
+        self.segment_focus_samples: List[FocusSample] = []
+        self._segment_evidence_buffer: List[FrameEvidence] = []
+        self._segment_buffered_seconds = 0.0
+        self._segment_files_since_output_began = 0
+        self._segment_shot_index = 0
+        # Frames/ms fully consumed so far in the current shot cycle, counted
+        # from the cycle's first file. At output time this becomes the shift
+        # that re-bases everything negative, relative to the file being
+        # processed when the shot concludes (see _finalize_segment_shot).
+        self._segment_cumulative_frames = 0
+        self._segment_cumulative_ms = 0
+
     def intervals_for(self, video: VideoSource) -> List[ShotInterval]:
         if self.manifest is not None:
             return self.manifest.intervals_for(video.path)
@@ -144,45 +178,13 @@ class ShotFocusService:
             return max(frame.candidates, key=lambda item: item.confidence)
         return None
 
-    def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
-
-
-
-        video = VideoSource(source_media)
-        analyses: List[ShotAnalysis] = []
-        for interval in self.intervals_for(video):
-            analyses.append(self._analyze_interval(video, interval))
-        return analyses
-
-    def _analyze_interval(self, video: VideoSource, interval: ShotInterval) -> ShotAnalysis:
-        start_frame, end_frame = video.validate_interval(interval, self.config.max_shot_seconds)
-        evidence: List[FrameEvidence] = []
-        for frame_indices, frames in video.iter_sample_batches(
-            start_frame=start_frame,
-            end_frame=end_frame,
-            inference_fps=self.config.inference_fps,
-            batch_size=self.config.batch_size,
-            max_seconds=self.config.family_determination_max_seconds,
-        ):
-            print("infer batch size", len(frame_indices))
-            if len(frame_indices) > 0: print("frame[0]", frame_indices[0])
-
-            evidence.extend(
-                self.model.infer_batch(
-                    frame_indices=frame_indices,
-                    frames=frames,
-                    source_fps=video.info.fps,
-                )
-            )
-        if not evidence:
-            raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
-
-        family, family_confidence = self._family_vote(evidence)
-        print("family, confidence", family, family_confidence)
-        focus_samples: List[FocusSample] = []
+    def _select_focus_series(
+        self, evidence: Sequence[FrameEvidence], family: str
+    ) -> Tuple[List[int], List[Optional[float]], List[float], List[FocusSample]]:
+        sample_frame_indices: List[int] = []
         raw_x: List[Optional[float]] = []
         confidences: List[float] = []
-        sample_frame_indices: List[int] = []
+        focus_samples: List[FocusSample] = []
         for frame in evidence:
             selected = self._select_focus(frame, family)
             sample_frame_indices.append(frame.frame_index)
@@ -212,11 +214,29 @@ class ShotFocusService:
                         raw_x_center_norm=selected.x_center,
                     )
                 )
+        return sample_frame_indices, raw_x, confidences, focus_samples
 
+    def _build_shot_analysis(
+        self,
+        *,
+        source_media: str,
+        shot_id: str,
+        start_ms: int,
+        end_ms: int,
+        start_frame: int,
+        end_frame: int,
+        source_fps: float,
+        source_width: int,
+        source_height: int,
+        family: str,
+        family_confidence: float,
+        sample_frame_indices: Sequence[int],
+        raw_x: Sequence[Optional[float]],
+        confidences: Sequence[float],
+        focus_samples: Sequence[FocusSample],
+    ) -> ShotAnalysis:
         crop_width, legal_min, legal_max = legal_crop_geometry(
-            video.info.width,
-            video.info.height,
-            self.config.target_aspect_width_over_height,
+            source_width, source_height, self.config.target_aspect_width_over_height
         )
         sample_x = smooth_samples(
             family=family,
@@ -235,15 +255,15 @@ class ShotFocusService:
             legal_max=legal_max,
         )
         return ShotAnalysis(
-            source_media=video.path,
-            shot_id=interval.shot_id,
-            start_ms=interval.start_ms,
-            end_ms=interval.end_ms,
+            source_media=source_media,
+            shot_id=shot_id,
+            start_ms=start_ms,
+            end_ms=end_ms,
             start_frame=start_frame,
             frame_count=end_frame - start_frame,
-            source_fps=video.info.fps,
-            source_width=video.info.width,
-            source_height=video.info.height,
+            source_fps=source_fps,
+            source_width=source_width,
+            source_height=source_height,
             family=family,
             category=CATEGORY_BY_FAMILY.get(family, "other"),
             family_confidence=family_confidence,
@@ -251,4 +271,216 @@ class ShotFocusService:
             x_coordinates=tuple(float(value) for value in expanded),
             focus_samples=tuple(focus_samples),
             model=self.model.identity,
+        )
+
+    def _extend_offset_buffers(self, evidence: Sequence[FrameEvidence]) -> None:
+        sample_frame_indices, raw_x, confidences, focus_samples = self._select_focus_series(
+            evidence, self.segment_family
+        )
+        self.segment_sample_frame_indices.extend(sample_frame_indices)
+        self.segment_raw_x.extend(raw_x)
+        self.segment_confidences.extend(confidences)
+        self.segment_focus_samples.extend(focus_samples)
+
+    def _reset_current_segment_shot(self) -> None:
+        self.segment_state = "determining_family"
+        self.segment_family = None
+        self.segment_family_confidence = None
+        self.segment_raw_x = []
+        self.segment_confidences = []
+        self.segment_sample_frame_indices = []
+        self.segment_focus_samples = []
+        self._segment_evidence_buffer = []
+        self._segment_buffered_seconds = 0.0
+        self._segment_files_since_output_began = 0
+        self._segment_cumulative_frames = 0
+        self._segment_cumulative_ms = 0
+
+    def _finalize_segment_shot(
+        self, *, source_media: str, video_info: VideoInfo, end_frame: int
+    ) -> ShotAnalysis:
+        # Everything buffered so far is relative to the start of the current
+        # shot cycle. Re-base it negative, relative to frame 0 of the file
+        # being processed right now (the one concluding the shot), by
+        # shifting back by however many frames/ms of *earlier* files fed
+        # this cycle before it.
+        shift_frames = self._segment_cumulative_frames
+        shift_ms = self._segment_cumulative_ms
+        shot_id = f"shot_{self._segment_shot_index:06d}"
+        self._segment_shot_index += 1
+        sample_frame_indices = [index - shift_frames for index in self.segment_sample_frame_indices]
+        focus_samples = [
+            replace(
+                sample,
+                frame_index=sample.frame_index - shift_frames,
+                timestamp_ms=sample.timestamp_ms - shift_ms,
+            )
+            for sample in self.segment_focus_samples
+        ]
+        return self._build_shot_analysis(
+            source_media=source_media,
+            shot_id=shot_id,
+            start_ms=-shift_ms,
+            end_ms=int(round(1000.0 * end_frame / video_info.fps)),
+            start_frame=-shift_frames,
+            end_frame=end_frame,
+            source_fps=video_info.fps,
+            source_width=video_info.width,
+            source_height=video_info.height,
+            family=self.segment_family,
+            family_confidence=self.segment_family_confidence,
+            sample_frame_indices=sample_frame_indices,
+            raw_x=self.segment_raw_x,
+            confidences=self.segment_confidences,
+            focus_samples=focus_samples,
+        )
+
+    def _try_determine_family(self) -> None:
+        if self._segment_buffered_seconds < self.config.family_determination_max_seconds:
+            return
+        family, family_confidence = self._family_vote(self._segment_evidence_buffer)
+        self.segment_family = family
+        self.segment_family_confidence = family_confidence
+        self._extend_offset_buffers(self._segment_evidence_buffer)
+        self._segment_evidence_buffer = []
+        self.segment_state = "outputting_offset"
+        self._segment_files_since_output_began = 0
+
+    def _advance_segment_state(
+        self, source_media: str, video_info: VideoInfo, evidence: Sequence[FrameEvidence]
+    ) -> List[ShotAnalysis]:
+        if not evidence:
+            raise ValueError(f"segment {source_media} produced no decodable frames")
+
+        # Re-base this file's frame indices/timestamps onto the running,
+        # monotonically increasing axis for the current shot cycle (frame 0
+        # == the cycle's first file's frame 0), so buffered evidence from
+        # different physical files can be interpolated/finalized together.
+        frame_base = self._segment_cumulative_frames
+        ms_base = self._segment_cumulative_ms
+        remapped = [
+            FrameEvidence(
+                frame_index=frame.frame_index + frame_base,
+                timestamp_ms=frame.timestamp_ms + ms_base,
+                candidates=frame.candidates,
+            )
+            for frame in evidence
+        ]
+
+        if self.segment_state == "determining_family":
+            self._segment_evidence_buffer.extend(remapped)
+            self._segment_buffered_seconds += video_info.duration_ms / 1000.0
+            self._segment_cumulative_frames += video_info.frame_count
+            self._segment_cumulative_ms += video_info.duration_ms
+            self._try_determine_family()
+            return []
+
+        # outputting_offset
+        self._segment_files_since_output_began += 1
+        if self._segment_files_since_output_began < _ARBITRARY_SHOT_BOUNDARY_FILE_COUNT:
+            self._extend_offset_buffers(remapped)
+            self._segment_cumulative_frames += video_info.frame_count
+            self._segment_cumulative_ms += video_info.duration_ms
+            return []
+
+        # Arbitrary placeholder shot boundary: split this file in half.
+        split_frame = video_info.frame_count // 2
+        first_half = [frame for frame, raw in zip(remapped, evidence) if raw.frame_index < split_frame]
+        second_half = [raw for raw in evidence if raw.frame_index >= split_frame]
+        self._extend_offset_buffers(first_half)
+
+        completed = self._finalize_segment_shot(
+            source_media=source_media, video_info=video_info, end_frame=split_frame
+        )
+        self._reset_current_segment_shot()
+
+        # Hand the leftover half straight to the next determining_family
+        # cycle, so the buffer never has to rewind to a file's beginning.
+        # The new cycle's reference frame 0 is the leftover's own first
+        # frame, so its indices/timestamps are rebased back by split_frame.
+        if second_half:
+            split_frame_ms = int(round(1000.0 * split_frame / video_info.fps))
+            rebased_second_half = [
+                FrameEvidence(
+                    frame_index=raw.frame_index - split_frame,
+                    timestamp_ms=raw.timestamp_ms - split_frame_ms,
+                    candidates=raw.candidates,
+                )
+                for raw in second_half
+            ]
+            self._segment_evidence_buffer.extend(rebased_second_half)
+            remaining_frames = video_info.frame_count - split_frame
+            self._segment_buffered_seconds += remaining_frames / video_info.fps
+            self._segment_cumulative_frames = remaining_frames
+            self._segment_cumulative_ms = video_info.duration_ms - split_frame_ms
+            self._try_determine_family()
+
+        return [completed]
+
+    def ingest_segment_file(self, source_media: str) -> List[ShotAnalysis]:
+        video = VideoSource(source_media)
+        evidence: List[FrameEvidence] = []
+        for frame_indices, frames in video.iter_sample_batches(
+            start_frame=0,
+            end_frame=video.info.frame_count,
+            inference_fps=self.config.inference_fps,
+            batch_size=self.config.batch_size,
+        ):
+            evidence.extend(
+                self.model.infer_batch(
+                    frame_indices=frame_indices,
+                    frames=frames,
+                    source_fps=video.info.fps,
+                )
+            )
+        return self._advance_segment_state(source_media, video.info, evidence)
+
+    def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
+        if self.config.input_mode == "segment_file":
+            return self.ingest_segment_file(source_media)
+
+        video = VideoSource(source_media)
+        analyses: List[ShotAnalysis] = []
+        for interval in self.intervals_for(video):
+            analyses.append(self._analyze_interval(video, interval))
+        return analyses
+
+    def _analyze_interval(self, video: VideoSource, interval: ShotInterval) -> ShotAnalysis:
+        start_frame, end_frame = video.validate_interval(interval, self.config.max_shot_seconds)
+        evidence: List[FrameEvidence] = []
+        for frame_indices, frames in video.iter_sample_batches(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            inference_fps=self.config.inference_fps,
+            batch_size=self.config.batch_size,
+            max_seconds=self.config.family_determination_max_seconds,
+        ):
+            evidence.extend(
+                self.model.infer_batch(
+                    frame_indices=frame_indices,
+                    frames=frames,
+                    source_fps=video.info.fps,
+                )
+            )
+        if not evidence:
+            raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
+
+        family, family_confidence = self._family_vote(evidence)
+        sample_frame_indices, raw_x, confidences, focus_samples = self._select_focus_series(evidence, family)
+        return self._build_shot_analysis(
+            source_media=video.path,
+            shot_id=interval.shot_id,
+            start_ms=interval.start_ms,
+            end_ms=interval.end_ms,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            source_fps=video.info.fps,
+            source_width=video.info.width,
+            source_height=video.info.height,
+            family=family,
+            family_confidence=family_confidence,
+            sample_frame_indices=sample_frame_indices,
+            raw_x=raw_x,
+            confidences=confidences,
+            focus_samples=focus_samples,
         )
