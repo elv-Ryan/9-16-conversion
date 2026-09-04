@@ -162,6 +162,7 @@ class ShotFocusService:
             end_frame=end_frame,
             inference_fps=self.config.inference_fps,
             batch_size=self.config.batch_size,
+            max_seconds=self.config.family_determination_max_seconds,
         ):
             print("infer batch size", len(frame_indices))
             if len(frame_indices) > 0: print("frame[0]", frame_indices[0])
@@ -176,13 +177,7 @@ class ShotFocusService:
         if not evidence:
             raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
 
-        family_determination_cutoff_frame = start_frame + int(
-            round(self.config.family_determination_max_seconds * video.info.fps)
-        )
-        family_vote_evidence = [
-            frame for frame in evidence if frame.frame_index < family_determination_cutoff_frame
-        ] or evidence
-        family, family_confidence = self._family_vote(family_vote_evidence)
+        family, family_confidence = self._family_vote(evidence)
         print("family, confidence", family, family_confidence)
         focus_samples: List[FocusSample] = []
         raw_x: List[Optional[float]] = []

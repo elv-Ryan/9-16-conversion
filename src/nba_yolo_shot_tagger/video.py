@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -81,8 +81,13 @@ class VideoSource:
         end_frame: int,
         inference_fps: float,
         batch_size: int,
+        max_seconds: Optional[float] = None,
     ) -> Iterator[Tuple[List[int], List[np.ndarray]]]:
-        targets = self.sample_indices(start_frame, end_frame, self.info.fps, inference_fps)
+        effective_end_frame = end_frame
+        if max_seconds is not None:
+            cutoff_frame = start_frame + max(1, int(round(max_seconds * self.info.fps)))
+            effective_end_frame = min(end_frame, cutoff_frame)
+        targets = self.sample_indices(start_frame, effective_end_frame, self.info.fps, inference_fps)
         if not targets:
             return
         capture = cv2.VideoCapture(self.path)
