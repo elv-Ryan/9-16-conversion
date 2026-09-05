@@ -22,10 +22,11 @@ COPY requirements.txt pyproject.toml setup.py ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
-COPY src ./src
-COPY run.py ./run.py
 COPY models ./models
 COPY model-shot ./model-shot
+
+COPY src ./src
+COPY run.py ./run.py
 
 COPY scripts/verify_model_artifact.py ./scripts/verify_model_artifact.py
 
