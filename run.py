@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from typing import Any, Dict
+import os
 
 from loguru import logger
 
@@ -10,7 +11,7 @@ from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
 from nba_yolo_shot_tagger.config import config_from_params
 from nba_yolo_shot_tagger.producer import NbaShotFocusProducer
-from nba_yolo_shot_tagger.live import FileSink
+from nba_yolo_shot_tagger.live import FabricSink, NoopSink
 from nba_yolo_shot_tagger.service import ShotFocusService
 
 
@@ -68,7 +69,21 @@ def main() -> None:
         ),
     )
 
-    sink = FileSink("out.bin")
+    if config.live_data_stream:
+        live_q = os.getenv("ELV_CONTENT") or ""
+        tok = os.getenv("ELV_TOKEN") or ""
+
+        assert live_q, "container received live_data_stream argument but is missing ELV_CONTENT environment variable"
+        assert tok, "container received live_data_stream argument but is missing ELV_AUTH environment variable"
+
+        sink = FabricSink(
+            base_url="https://host-76-74-29-13.contentfabric.io",
+            live_q=live_q,
+            tok=tok,
+            data_stream=config.live_data_stream
+        )
+    else:
+        sink = NoopSink()
 
     service = ShotFocusService(config, sink)
 

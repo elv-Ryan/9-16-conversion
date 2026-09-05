@@ -44,6 +44,7 @@ class RuntimeConfig:
     batch_size: int = 8
     min_detection_confidence: float = 0.001
     use_fp16: bool = True
+    live_data_stream: str = ""
 
     input_mode: str = "shot_file"
     max_shot_seconds: float = 900.0

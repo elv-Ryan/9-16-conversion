@@ -3,3 +3,4 @@ loguru==0.7.3
 numpy>=1.26,<2.3
 opencv-python==4.12.0.88
 ultralytics==8.4.117
+requests
