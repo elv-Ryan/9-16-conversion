@@ -44,12 +44,19 @@ class FabricSink(VerticalSink):
         self.tok = tok
         self.stream = data_stream
         self.x_vals = []
+        self._initialized = False
 
     def publish(self, x_vals: list[float]) -> None:
         if not x_vals:
             return
 
         self.x_vals += x_vals
+
+        try:
+            self._create_stream_if_not_exists()
+        except Exception:
+            logger.opt(exception=True).error(f"Failed to create new stream")
+            return
 
         url = f"{self.url}/q/{self.q}/call/live/data_streams/{self.stream}"
 
@@ -63,3 +70,19 @@ class FabricSink(VerticalSink):
             return
 
         self.x_vals.clear()
+
+    def _create_stream_if_not_exists(self) -> None:
+        if self._initialized:
+            return
+
+        url = f"{self.url}/q/{self.q}/call/live/data_streams"
+
+        resp = requests.post(url, params={"authorization": self.tok}, json={"name": self.stream}, timeout=30)
+        if resp.status_code == 409:
+            # already set
+            self._initialized = True
+            return
+        
+        resp.raise_for_status()
+
+        self._initialized = True
