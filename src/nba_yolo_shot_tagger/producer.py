@@ -15,9 +15,9 @@ from .service import ShotFocusService
 class NbaShotFocusProducer(TagMessageProducer):
     """Long-lived Eluvio producer: each stdin path is one shot by default."""
 
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(self, config: RuntimeConfig, service: ShotFocusService) -> None:
         self.config = config
-        self.service = ShotFocusService(config)
+        self.service = service
 
     def produce(self, files: List[str]) -> Iterator[Message]:
         for source_media in files:

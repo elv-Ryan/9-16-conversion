@@ -14,6 +14,7 @@ from .trajectory import (
 )
 from .types import Candidate, FocusSample, FrameEvidence, ShotAnalysis, VideoInfo
 from .video import VideoSource
+from .live import VerticalSink
 
 
 CATEGORY_BY_FAMILY = {
@@ -62,7 +63,7 @@ class ShotFocusService:
     file's frame 0.
     """
 
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(self, config: RuntimeConfig, vertical_sink: VerticalSink) -> None:
         self.config = config
         self.model = YoloStudentModel(
             model_path=config.model_path,
@@ -73,6 +74,8 @@ class ShotFocusService:
             min_confidence=config.min_detection_confidence,
             use_fp16=config.use_fp16,
         )
+
+        self.x_sink = vertical_sink
 
         if config.input_mode == "segment_file":
             # Imported here so shot_file mode never has to load torch/TransNet.
@@ -328,6 +331,8 @@ class ShotFocusService:
         self._cycle_focus.extend(focus_samples)
         new_smoothed_samples = self._smooth_from(first_new)
         self._cycle_smoothed.extend(new_smoothed_samples)
+
+        self.x_sink.publish(new_smoothed_samples)
 
         ## write out new_smoothed_samples here
         ## it will be some amount of data, equivalent to a segment in the steady state, but there may be more or less if the shot is just starting or ending. 

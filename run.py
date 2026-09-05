@@ -10,6 +10,8 @@ from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
 from nba_yolo_shot_tagger.config import config_from_params
 from nba_yolo_shot_tagger.producer import NbaShotFocusProducer
+from nba_yolo_shot_tagger.live import FileSink
+from nba_yolo_shot_tagger.service import ShotFocusService
 
 
 def _replace_params_argument(params: Dict[str, Any]) -> None:
@@ -65,7 +67,14 @@ def main() -> None:
             sort_keys=True,
         ),
     )
-    run_default(NbaShotFocusProducer(config), batch_limit=1)
+
+    sink = FileSink("out.bin")
+
+    service = ShotFocusService(config, sink)
+
+    producer = NbaShotFocusProducer(config, service)
+
+    run_default(producer, batch_limit=1)
 
 
 if __name__ == "__main__":
