@@ -12,10 +12,6 @@ data/
 *.mp4
 *.mkv
 *.mov
-models/**/*.pt
-!models/**/.gitkeep
-!models/**/README.md
-!models/**/model_manifest.json
 
 test-runs/
 model-shot/**
