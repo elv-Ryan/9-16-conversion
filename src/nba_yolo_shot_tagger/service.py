@@ -1,32 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, replace
-import json
-from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
-import numpy as np
-from shot.model import ShotDetector
+from dataclasses import replace
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import RuntimeConfig
-from .model import EXPECTED_FAMILIES, YoloStudentModel
-from .trajectory import expand_to_source_frames, legal_crop_geometry, smooth_samples
-from .types import (
-    Candidate,
-    FocusSample,
-    FrameEvidence,
-    ShotAnalysis,
-    ShotInterval,
-    VideoInfo,
+from .model import YoloStudentModel
+from .trajectory import (
+    STATIC_FAMILIES,
+    expand_to_source_frames,
+    legal_crop_geometry,
+    smooth_samples,
 )
+from .types import Candidate, FocusSample, FrameEvidence, ShotAnalysis, VideoInfo
 from .video import VideoSource
-
-
-# Placeholder until real shot-boundary detection (src/shot) is wired into
-# segment_file mode: pretend a shot boundary falls halfway through this many
-# files after family becomes known.
-_ARBITRARY_SHOT_BOUNDARY_FILE_COUNT = 6
 
 
 CATEGORY_BY_FAMILY = {
@@ -39,48 +26,42 @@ CATEGORY_BY_FAMILY = {
     "static_composition": "static",
 }
 
-
-class ShotManifest:
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        if not self.path.is_file():
-            raise FileNotFoundError(f"shot manifest missing: {self.path}")
-        self.payload = json.loads(self.path.read_text(encoding="utf-8"))
-
-    @staticmethod
-    def _parse_list(items: object, source_media: str) -> List[ShotInterval]:
-        if not isinstance(items, list):
-            raise ValueError(f"shot manifest entry for {source_media!r} must be a list")
-        intervals: List[ShotInterval] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                raise ValueError(f"shot manifest item {index} must be an object")
-            start = item.get("start_ms")
-            end = item.get("end_ms")
-            if isinstance(start, bool) or not isinstance(start, int):
-                raise ValueError(f"shot manifest item {index}.start_ms must be an integer")
-            if isinstance(end, bool) or not isinstance(end, int):
-                raise ValueError(f"shot manifest item {index}.end_ms must be an integer")
-            shot_id = str(item.get("shot_id", f"shot_{index:06d}"))
-            intervals.append(ShotInterval(shot_id=shot_id, start_ms=start, end_ms=end))
-        return intervals
-
-    def intervals_for(self, source_media: str) -> List[ShotInterval]:
-        payload = self.payload
-        if isinstance(payload, list):
-            return self._parse_list(payload, source_media)
-        if not isinstance(payload, dict):
-            raise ValueError("shot manifest root must be a list or object")
-        if "shots" in payload:
-            return self._parse_list(payload["shots"], source_media)
-        candidates = [source_media, str(Path(source_media).resolve()), Path(source_media).name]
-        for key in candidates:
-            if key in payload:
-                return self._parse_list(payload[key], source_media)
-        raise ValueError(f"shot manifest has no entry for source media: {source_media}")
+# Already-committed samples fed back in as left context when smoothing the
+# next batch, so a batch boundary does not show up as a kink. The filters are
+# Python loops, so this also keeps the per-segment cost constant instead of
+# growing with the length of the open shot.
+SMOOTHING_CONTEXT_SAMPLES = 64
 
 
 class ShotFocusService:
+    """One pipeline for both input modes.
+
+    Every input file is decoded and inferred exactly once and folded onto a
+    single absolute stream axis. Shots are cut out of that axis; the only
+    difference between the modes is where the cuts come from:
+
+    ``segment_file``
+        TransNetV2 over a rolling buffer that carries frames across the joins
+        between files (see :mod:`shot_boundaries`). A shot may span several
+        files, and one file may contain several shots.
+    ``shot_file``
+        Each file already is one shot, so a cut is placed at the end of it.
+
+    A shot's family is voted on once ``family_determination_max_seconds`` of it
+    has been seen (or on whatever it has, if it is cut before that). From then
+    on its X trajectory is worked out as the segments arrive rather than in one
+    pass at the end: each segment catches up whatever the family vote was
+    waiting on and then keeps pace. Committed X values are final, because the
+    pipeline stays ``trajectory_commit_lag_frames`` behind the frames it has
+    folded -- clearing the margin shot detection needs before it will commit a
+    cut -- so a cut reported late never lands in already-committed
+    trajectory.
+
+    Because a shot is emitted against the file being processed when it is cut,
+    everything it saw earlier is expressed as a negative offset from that
+    file's frame 0.
+    """
+
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
         self.model = YoloStudentModel(
@@ -92,75 +73,295 @@ class ShotFocusService:
             min_confidence=config.min_detection_confidence,
             use_fp16=config.use_fp16,
         )
-        self.manifest = ShotManifest(config.shot_manifest_path) if config.input_mode == "shot_manifest" else None
 
         if config.input_mode == "segment_file":
-            self.shot_detector = ShotDetector(
-                transnet_path=config.shot_model_path,
-                contiguous=False,  # True,
+            # Imported here so shot_file mode never has to load torch/TransNet.
+            from .shot_boundaries import StreamShotDetector
+
+            self.shot_detector = StreamShotDetector(
+                config.shot_model_path,
+                device="cpu" if config.device == "cpu" else None,
             )
+            # Only segment_file defers cuts, so only it has to hold back.
+            self._commit_lag = config.trajectory_commit_lag_frames
         else:
             self.shot_detector = None
+            self._commit_lag = 0
 
-        # segment_file mode: stateful buffering across incoming ~2s segment
-        # files, until real shot-boundary detection replaces the arbitrary
-        # placeholder boundary below.
-        self.segment_state = "determining_family"
-        self.segment_family: Optional[str] = None
-        self.segment_family_confidence: Optional[float] = None
-        self.segment_raw_x: List[Optional[float]] = []
-        self.segment_confidences: List[float] = []
-        self.segment_sample_frame_indices: List[int] = []
-        self.segment_focus_samples: List[FocusSample] = []
-        self._segment_evidence_buffer: List[FrameEvidence] = []
-        self._segment_buffered_seconds = 0.0
-        self._segment_files_since_output_began = 0
-        self._segment_shot_index = 0
-        # Frames/ms fully consumed so far in the current shot cycle, counted
-        # from the cycle's first file. At output time this becomes the shift
-        # that re-bases everything negative, relative to the file being
-        # processed when the shot concludes (see _finalize_segment_shot).
-        self._segment_cumulative_frames = 0
-        self._segment_cumulative_ms = 0
-        # Whether an ordinary (whole) file has been folded into the current
-        # cycle yet. False only right after a boundary reseed, until either
-        # another file arrives (cumulative-based shift becomes valid again)
-        # or the stream ends first (finalize_segment_stream needs the exact
-        # physical offset below instead).
-        self._segment_cycle_has_full_file = True
-        self._segment_cycle_start_true_offset_frames = 0
-        self._segment_cycle_start_true_offset_ms = 0
-        # The most recent file seen at all (persists across shot cycles), so
-        # finalize_segment_stream has a source_media/VideoInfo to finish
-        # against once there are no more input files.
-        self._segment_last_source_media: Optional[str] = None
-        self._segment_last_video_info: Optional[VideoInfo] = None
+        self._shot_index = 0
+        self._abs_frames = 0  # source frames folded so far, across all files
+        self._abs_ms = 0
+        self._last_source_media: Optional[str] = None
+        self._last_video_info: Optional[VideoInfo] = None
+        self._last_abs_start = 0
+        self._last_abs_start_ms = 0
+        self._reset_cycle(0, 0)
 
-    def intervals_for(self, video: VideoSource) -> List[ShotInterval]:
-        if self.manifest is not None:
-            return self.manifest.intervals_for(video.path)
+    @property
+    def shot_state(self) -> str:
+        return "determining_family" if self.current_family is None else "outputting_offset"
 
+    # ------------------------------------------------------------------
+    # public entry points
+    # ------------------------------------------------------------------
+
+    def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
+        """Consume one input file, returning every shot cut while doing so."""
+        video = VideoSource(source_media)
+        evidence = self._infer_file(video)
+        return self._consume_file(video, evidence)
+
+    def finalize(self) -> List[ShotAnalysis]:
+        """Close out the stream once there are no more input files.
+
+        The detector is holding back any cut it could not yet see past, and
+        the last shot has no closing cut at all, so both are settled here.
+        """
+        if self._last_video_info is None:
+            return []
+        completed: List[ShotAnalysis] = []
         if self.shot_detector is not None:
-            shot_boundaries = self.shot_detector.tag_file_given_info(video.path, video.info.fps, round(video.info.duration_ms))
-            intervals: List[ShotInterval] = []
+            for relative_cut in self.shot_detector.flush():
+                analysis = self._close(self._last_abs_start + relative_cut)
+                if analysis is not None:
+                    completed.append(analysis)
+        analysis = self._close(self._abs_frames)
+        if analysis is not None:
+            completed.append(analysis)
+        return completed
 
-            for index, interval in enumerate(shot_boundaries):
-                intervals.append(
-                    ShotInterval(
-                        shot_id=f"shot_{index:06d}",
-                        start_ms=interval.start_time,
-                        end_ms=interval.end_time,
-                    )
+    # ------------------------------------------------------------------
+    # per-file processing
+    # ------------------------------------------------------------------
+
+    def _infer_file(self, video: VideoSource) -> List[FrameEvidence]:
+        evidence: List[FrameEvidence] = []
+        for frame_indices, frames in video.iter_sample_batches(
+            start_frame=0,
+            end_frame=video.info.frame_count,
+            inference_fps=self.config.inference_fps,
+            batch_size=self.config.batch_size,
+        ):
+            evidence.extend(
+                self.model.infer_batch(
+                    frame_indices=frame_indices,
+                    frames=frames,
+                    source_fps=video.info.fps,
                 )
-            return intervals
-
-        return [
-            ShotInterval(
-                shot_id="shot_000000",
-                start_ms=0,
-                end_ms=video.info.duration_ms,
             )
+        if not evidence:
+            raise ValueError(f"{video.path} produced no decodable frames")
+        return evidence
+
+    def _cuts_for(self, video: VideoSource, abs_start: int) -> List[int]:
+        """Absolute stream frames at which a new shot starts."""
+        if self.shot_detector is None:
+            # shot_file: the file is the shot, so it is cut at the file end.
+            return [abs_start + video.info.frame_count]
+        # Cuts come back relative to this file's start, and are negative when
+        # they fall in the tail the detector had deferred until now.
+        return [abs_start + cut for cut in self.shot_detector.push(video.path)]
+
+    def _consume_file(
+        self, video: VideoSource, evidence: Sequence[FrameEvidence]
+    ) -> List[ShotAnalysis]:
+        info = video.info
+        abs_start = self._abs_frames
+        abs_start_ms = self._abs_ms
+        self._last_source_media = video.path
+        self._last_video_info = info
+        self._last_abs_start = abs_start
+        self._last_abs_start_ms = abs_start_ms
+
+        cuts = self._cuts_for(video, abs_start)
+        self._fold(evidence, info, abs_start, abs_start_ms)
+
+        # Cuts first: everything committed so far sits behind the oldest cut
+        # this round can report, so none of it has to be revisited.
+        completed: List[ShotAnalysis] = []
+        for cut in cuts:
+            analysis = self._close(cut)
+            if analysis is not None:
+                completed.append(analysis)
+
+        # Then catch up / keep up on the shot that is still open.
+        self._advance(self._abs_frames - self._commit_lag - self._cycle_start_abs)
+
+        if (self._abs_ms - self._cycle_start_abs_ms) / 1000.0 >= self.config.max_shot_seconds:
+            # Safety valve: an open shot is held in memory, and a stream can
+            # run a long way without a detected cut.
+            analysis = self._close(self._abs_frames)
+            if analysis is not None:
+                completed.append(analysis)
+        return completed
+
+    def _fold(
+        self,
+        evidence: Sequence[FrameEvidence],
+        info: VideoInfo,
+        abs_start: int,
+        abs_start_ms: int,
+    ) -> None:
+        """Add a file's evidence to the open shot, on that shot's own axis."""
+        frame_base = abs_start - self._cycle_start_abs
+        ms_base = abs_start_ms - self._cycle_start_abs_ms
+        self._cycle_pending.extend(
+            replace(
+                frame,
+                frame_index=frame.frame_index + frame_base,
+                timestamp_ms=frame.timestamp_ms + ms_base,
+            )
+            for frame in evidence
+        )
+        self._abs_frames = abs_start + info.frame_count
+        self._abs_ms = abs_start_ms + info.duration_ms
+
+    def _close(self, cut_abs: int) -> Optional[ShotAnalysis]:
+        """Cut the open shot at an absolute stream frame and emit it.
+
+        The shot is emitted against the file currently being processed, so a
+        cut that lands before that file starts (one the detector deferred)
+        simply produces a more negative offset.
+        """
+        length = cut_abs - self._cycle_start_abs
+        if length <= 0:
+            return None
+        info = self._last_video_info
+        anchor_abs = self._last_abs_start
+        anchor_abs_ms = self._last_abs_start_ms
+
+        # Settle the rest of this shot: a family if it was cut before the vote
+        # was due, and the trajectory for whatever was still being held back.
+        self._advance(length, force_family=True)
+
+        start_frame = self._cycle_start_abs - anchor_abs
+        end_frame = cut_abs - anchor_abs
+        start_ms = self._cycle_start_abs_ms - anchor_abs_ms
+        # A sub-millisecond shot must still be a non-empty interval.
+        end_ms = max(_frame_to_ms(end_frame, info.fps), start_ms + 1)
+
+        analysis = self._build_shot_analysis(
+            source_media=self._last_source_media,
+            shot_id=f"shot_{self._shot_index:06d}",
+            start_ms=start_ms,
+            end_ms=end_ms,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            info=info,
+            sample_frame_indices=[index + start_frame for index in self._cycle_indices],
+            sample_x=self._cycle_smoothed,
+            focus_samples=[
+                replace(
+                    sample,
+                    frame_index=sample.frame_index + start_frame,
+                    timestamp_ms=sample.timestamp_ms + start_ms,
+                )
+                for sample in self._cycle_focus
+            ],
+        )
+        self._shot_index += 1
+
+        # Whatever came after the cut opens the next shot. It was never
+        # committed, so it carries over as raw evidence and is re-decided.
+        length_ms = _frame_to_ms(length, info.fps)
+        remainder = [
+            replace(
+                frame,
+                frame_index=frame.frame_index - length,
+                timestamp_ms=frame.timestamp_ms - length_ms,
+            )
+            for frame in self._cycle_pending
         ]
+        self._reset_cycle(cut_abs, anchor_abs_ms + end_ms, remainder)
+        return analysis
+
+    # ------------------------------------------------------------------
+    # open-shot state
+    # ------------------------------------------------------------------
+
+    def _reset_cycle(
+        self,
+        start_abs: int,
+        start_abs_ms: int,
+        pending: Optional[List[FrameEvidence]] = None,
+    ) -> None:
+        self._cycle_start_abs = start_abs
+        self._cycle_start_abs_ms = start_abs_ms
+        # Evidence past the commit horizon, still waiting to be decided.
+        self._cycle_pending: List[FrameEvidence] = pending or []
+        # Committed, parallel, on this shot's own frame axis.
+        self._cycle_indices: List[int] = []
+        self._cycle_raw_x: List[Optional[float]] = []
+        self._cycle_confidences: List[float] = []
+        self._cycle_focus: List[FocusSample] = []
+        self._cycle_smoothed: List[float] = []
+        self._cycle_static_lock: Optional[float] = None
+        self.current_family: Optional[str] = None
+        self.current_family_confidence: Optional[float] = None
+
+    def _advance(self, limit: int, force_family: bool = False) -> None:
+        """Commit the open shot's trajectory for everything before ``limit``.
+
+        ``limit`` is a frame position on the shot's own axis. Evidence beyond
+        it stays pending: it is inside the margin where a cut can still be
+        reported, so deciding it now could mean redoing it.
+        """
+        ready = [frame for frame in self._cycle_pending if frame.frame_index < limit]
+        if self.current_family is None:
+            seen_seconds = _frame_to_ms(limit, self._last_video_info.fps) / 1000.0
+            if not force_family and seen_seconds < self.config.family_determination_max_seconds:
+                return
+            self.current_family, self.current_family_confidence = self._family_vote(ready)
+        if not ready:
+            return
+        self._cycle_pending = [
+            frame for frame in self._cycle_pending if frame.frame_index >= limit
+        ]
+
+        first_new = len(self._cycle_indices)
+        indices, raw_x, confidences, focus_samples = self._select_focus_series(
+            ready, self.current_family
+        )
+        self._cycle_indices.extend(indices)
+        self._cycle_raw_x.extend(raw_x)
+        self._cycle_confidences.extend(confidences)
+        self._cycle_focus.extend(focus_samples)
+        new_smoothed_samples = self._smooth_from(first_new)
+        self._cycle_smoothed.extend(new_smoothed_samples)
+
+        ## write out new_smoothed_samples here
+        ## it will be some amount of data, equivalent to a segment in the steady state, but there may be more or less if the shot is just starting or ending. 
+        
+    def _smooth_from(self, first_new: int) -> List[float]:
+        """Smoothed X for samples ``first_new`` onwards, once and for all."""
+        info = self._last_video_info
+        _, legal_min, legal_max = legal_crop_geometry(
+            info.width, info.height, self.config.target_aspect_width_over_height
+        )
+        if self._cycle_static_lock is not None:
+            # A static family holds one crop for the whole shot; re-deriving it
+            # per batch would make a shot that is meant to be still drift around randomly.
+            return [self._cycle_static_lock] * (len(self._cycle_raw_x) - first_new)
+
+        # Feed already-committed samples back in as left context so the batch
+        # boundary does not show up as a kink.
+        window_start = max(0, first_new - SMOOTHING_CONTEXT_SAMPLES)
+        smoothed = smooth_samples(
+            family=self.current_family,
+            raw_x=self._cycle_raw_x[window_start:],
+            confidences=self._cycle_confidences[window_start:],
+            inference_fps=self.config.inference_fps,
+            legal_min=legal_min,
+            legal_max=legal_max,
+        )
+        values = [float(value) for value in smoothed[first_new - window_start :]]
+        if self.current_family in STATIC_FAMILIES and values:
+            self._cycle_static_lock = values[0]
+        return values
+
+    # ------------------------------------------------------------------
+    # family / focus selection
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _family_vote(evidence: Sequence[FrameEvidence]) -> tuple[str, float]:
@@ -229,6 +430,10 @@ class ShotFocusService:
                 )
         return sample_frame_indices, raw_x, confidences, focus_samples
 
+    # ------------------------------------------------------------------
+    # output
+    # ------------------------------------------------------------------
+
     def _build_shot_analysis(
         self,
         *,
@@ -238,26 +443,13 @@ class ShotFocusService:
         end_ms: int,
         start_frame: int,
         end_frame: int,
-        source_fps: float,
-        source_width: int,
-        source_height: int,
-        family: str,
-        family_confidence: float,
+        info: VideoInfo,
         sample_frame_indices: Sequence[int],
-        raw_x: Sequence[Optional[float]],
-        confidences: Sequence[float],
+        sample_x: Sequence[float],
         focus_samples: Sequence[FocusSample],
     ) -> ShotAnalysis:
         crop_width, legal_min, legal_max = legal_crop_geometry(
-            source_width, source_height, self.config.target_aspect_width_over_height
-        )
-        sample_x = smooth_samples(
-            family=family,
-            raw_x=raw_x,
-            confidences=confidences,
-            inference_fps=self.config.inference_fps,
-            legal_min=legal_min,
-            legal_max=legal_max,
+            info.width, info.height, self.config.target_aspect_width_over_height
         )
         expanded = expand_to_source_frames(
             sample_frame_indices=sample_frame_indices,
@@ -274,296 +466,18 @@ class ShotFocusService:
             end_ms=end_ms,
             start_frame=start_frame,
             frame_count=end_frame - start_frame,
-            source_fps=source_fps,
-            source_width=source_width,
-            source_height=source_height,
-            family=family,
-            category=CATEGORY_BY_FAMILY.get(family, "other"),
-            family_confidence=family_confidence,
+            source_fps=info.fps,
+            source_width=info.width,
+            source_height=info.height,
+            family=self.current_family,
+            category=CATEGORY_BY_FAMILY.get(self.current_family, "other"),
+            family_confidence=self.current_family_confidence,
             crop_width_norm=crop_width,
             x_coordinates=tuple(float(value) for value in expanded),
             focus_samples=tuple(focus_samples),
             model=self.model.identity,
         )
 
-    def _extend_offset_buffers(self, evidence: Sequence[FrameEvidence]) -> None:
-        sample_frame_indices, raw_x, confidences, focus_samples = self._select_focus_series(
-            evidence, self.segment_family
-        )
-        self.segment_sample_frame_indices.extend(sample_frame_indices)
-        self.segment_raw_x.extend(raw_x)
-        self.segment_confidences.extend(confidences)
-        self.segment_focus_samples.extend(focus_samples)
 
-    def _reset_current_segment_shot(self) -> None:
-        self.segment_state = "determining_family"
-        self.segment_family = None
-        self.segment_family_confidence = None
-        self.segment_raw_x = []
-        self.segment_confidences = []
-        self.segment_sample_frame_indices = []
-        self.segment_focus_samples = []
-        self._segment_evidence_buffer = []
-        self._segment_buffered_seconds = 0.0
-        self._segment_files_since_output_began = 0
-        self._segment_cumulative_frames = 0
-        self._segment_cumulative_ms = 0
-        self._segment_cycle_has_full_file = True
-        self._segment_cycle_start_true_offset_frames = 0
-        self._segment_cycle_start_true_offset_ms = 0
-
-    def _finalize_segment_shot(
-        self,
-        *,
-        source_media: str,
-        video_info: VideoInfo,
-        end_frame: int,
-        shift_frames: int,
-        shift_ms: int,
-    ) -> ShotAnalysis:
-        # Everything buffered so far is relative to the start of the current
-        # shot cycle. Re-base it negative, relative to frame 0 of the file
-        # being processed right now (the one concluding the shot), by
-        # shifting back by however many frames/ms of *earlier* files fed
-        # this cycle before it.
-        shot_id = f"shot_{self._segment_shot_index:06d}"
-        self._segment_shot_index += 1
-        sample_frame_indices = [index - shift_frames for index in self.segment_sample_frame_indices]
-        focus_samples = [
-            replace(
-                sample,
-                frame_index=sample.frame_index - shift_frames,
-                timestamp_ms=sample.timestamp_ms - shift_ms,
-            )
-            for sample in self.segment_focus_samples
-        ]
-        return self._build_shot_analysis(
-            source_media=source_media,
-            shot_id=shot_id,
-            start_ms=-shift_ms,
-            end_ms=int(round(1000.0 * end_frame / video_info.fps)),
-            start_frame=-shift_frames,
-            end_frame=end_frame,
-            source_fps=video_info.fps,
-            source_width=video_info.width,
-            source_height=video_info.height,
-            family=self.segment_family,
-            family_confidence=self.segment_family_confidence,
-            sample_frame_indices=sample_frame_indices,
-            raw_x=self.segment_raw_x,
-            confidences=self.segment_confidences,
-            focus_samples=focus_samples,
-        )
-
-    def _try_determine_family(self) -> None:
-        if self._segment_buffered_seconds < self.config.family_determination_max_seconds:
-            return
-        family, family_confidence = self._family_vote(self._segment_evidence_buffer)
-        self.segment_family = family
-        self.segment_family_confidence = family_confidence
-        self._extend_offset_buffers(self._segment_evidence_buffer)
-        self._segment_evidence_buffer = []
-        self.segment_state = "outputting_offset"
-        self._segment_files_since_output_began = 0
-
-    def _advance_segment_state(
-        self, source_media: str, video_info: VideoInfo, evidence: Sequence[FrameEvidence]
-    ) -> List[ShotAnalysis]:
-        if not evidence:
-            raise ValueError(f"segment {source_media} produced no decodable frames")
-
-        self._segment_last_source_media = source_media
-        self._segment_last_video_info = video_info
-
-        # Re-base this file's frame indices/timestamps onto the running,
-        # monotonically increasing axis for the current shot cycle (frame 0
-        # == the cycle's first file's frame 0), so buffered evidence from
-        # different physical files can be interpolated/finalized together.
-        frame_base = self._segment_cumulative_frames
-        ms_base = self._segment_cumulative_ms
-        remapped = [
-            FrameEvidence(
-                frame_index=frame.frame_index + frame_base,
-                timestamp_ms=frame.timestamp_ms + ms_base,
-                candidates=frame.candidates,
-            )
-            for frame in evidence
-        ]
-
-        if self.segment_state == "determining_family":
-            self._segment_evidence_buffer.extend(remapped)
-            self._segment_buffered_seconds += video_info.duration_ms / 1000.0
-            self._segment_cumulative_frames += video_info.frame_count
-            self._segment_cumulative_ms += video_info.duration_ms
-            self._segment_cycle_has_full_file = True
-            self._try_determine_family()
-            return []
-
-        # outputting_offset
-        self._segment_files_since_output_began += 1
-        if self._segment_files_since_output_began < _ARBITRARY_SHOT_BOUNDARY_FILE_COUNT:
-            self._extend_offset_buffers(remapped)
-            self._segment_cumulative_frames += video_info.frame_count
-            self._segment_cumulative_ms += video_info.duration_ms
-            self._segment_cycle_has_full_file = True
-            return []
-
-        # Arbitrary placeholder shot boundary: split this file in half.
-        split_frame = video_info.frame_count // 2
-        first_half = [frame for frame, raw in zip(remapped, evidence) if raw.frame_index < split_frame]
-        second_half = [raw for raw in evidence if raw.frame_index >= split_frame]
-        self._extend_offset_buffers(first_half)
-
-        completed = self._finalize_segment_shot(
-            source_media=source_media,
-            video_info=video_info,
-            end_frame=split_frame,
-            shift_frames=self._segment_cumulative_frames,
-            shift_ms=self._segment_cumulative_ms,
-        )
-        self._reset_current_segment_shot()
-
-        # Hand the leftover half straight to the next determining_family
-        # cycle, so the buffer never has to rewind to a file's beginning.
-        # The new cycle's reference frame 0 is the leftover's own first
-        # frame, so its indices/timestamps are rebased back by split_frame.
-        # Nothing whole has been folded into this fresh cycle yet: remember
-        # the true physical offset in case the stream ends before any other
-        # file arrives (see finalize_segment_stream).
-        if second_half:
-            split_frame_ms = int(round(1000.0 * split_frame / video_info.fps))
-            rebased_second_half = [
-                FrameEvidence(
-                    frame_index=raw.frame_index - split_frame,
-                    timestamp_ms=raw.timestamp_ms - split_frame_ms,
-                    candidates=raw.candidates,
-                )
-                for raw in second_half
-            ]
-            self._segment_evidence_buffer.extend(rebased_second_half)
-            remaining_frames = video_info.frame_count - split_frame
-            self._segment_buffered_seconds += remaining_frames / video_info.fps
-            self._segment_cumulative_frames = remaining_frames
-            self._segment_cumulative_ms = video_info.duration_ms - split_frame_ms
-            self._segment_cycle_has_full_file = False
-            self._segment_cycle_start_true_offset_frames = split_frame
-            self._segment_cycle_start_true_offset_ms = split_frame_ms
-            self._try_determine_family()
-
-        return [completed]
-
-    def finalize_segment_stream(self) -> List[ShotAnalysis]:
-        """Called once there are no more input files, to flush whatever shot
-        is still in progress. There is no next file to hand a leftover
-        remainder to (and no more frames to ever determine a fresh family
-        from), so unlike the arbitrary mid-stream boundary this always
-        consumes everything buffered rather than splitting anything off."""
-        if self._segment_last_video_info is None:
-            return []
-
-        if self.segment_state == "determining_family" and self._segment_evidence_buffer:
-            # Force a vote on whatever was buffered, even though
-            # family_determination_max_seconds was never reached -- there is
-            # no more video coming to wait for.
-            family, family_confidence = self._family_vote(self._segment_evidence_buffer)
-            self.segment_family = family
-            self.segment_family_confidence = family_confidence
-            self._extend_offset_buffers(self._segment_evidence_buffer)
-            self._segment_evidence_buffer = []
-
-        if not self.segment_sample_frame_indices:
-            return []
-
-        video_info = self._segment_last_video_info
-        if self._segment_cycle_has_full_file:
-            # The usual case: at least one whole file was folded into this
-            # cycle since the last reseed, so the running cumulative counters
-            # already exclude the most recent (now-reference) file's own
-            # contribution the same way a normal boundary would.
-            shift_frames = self._segment_cumulative_frames - video_info.frame_count
-            shift_ms = self._segment_cumulative_ms - video_info.duration_ms
-        else:
-            # The stream ended immediately after a boundary reseed, before
-            # any further file arrived: the only data in this cycle is a
-            # tail slice of video_info itself, so the shift is exactly the
-            # true physical offset where that tail slice began.
-            shift_frames = -self._segment_cycle_start_true_offset_frames
-            shift_ms = -self._segment_cycle_start_true_offset_ms
-
-        completed = self._finalize_segment_shot(
-            source_media=self._segment_last_source_media,
-            video_info=video_info,
-            end_frame=video_info.frame_count,
-            shift_frames=shift_frames,
-            shift_ms=shift_ms,
-        )
-        self._reset_current_segment_shot()
-        return [completed]
-
-    def ingest_segment_file(self, source_media: str) -> List[ShotAnalysis]:
-        video = VideoSource(source_media)
-        evidence: List[FrameEvidence] = []
-        for frame_indices, frames in video.iter_sample_batches(
-            start_frame=0,
-            end_frame=video.info.frame_count,
-            inference_fps=self.config.inference_fps,
-            batch_size=self.config.batch_size,
-        ):
-            evidence.extend(
-                self.model.infer_batch(
-                    frame_indices=frame_indices,
-                    frames=frames,
-                    source_fps=video.info.fps,
-                )
-            )
-        return self._advance_segment_state(source_media, video.info, evidence)
-
-    def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
-        if self.config.input_mode == "segment_file":
-            return self.ingest_segment_file(source_media)
-
-        video = VideoSource(source_media)
-        analyses: List[ShotAnalysis] = []
-        for interval in self.intervals_for(video):
-            analyses.append(self._analyze_interval(video, interval))
-        return analyses
-
-    def _analyze_interval(self, video: VideoSource, interval: ShotInterval) -> ShotAnalysis:
-        start_frame, end_frame = video.validate_interval(interval, self.config.max_shot_seconds)
-        evidence: List[FrameEvidence] = []
-        for frame_indices, frames in video.iter_sample_batches(
-            start_frame=start_frame,
-            end_frame=end_frame,
-            inference_fps=self.config.inference_fps,
-            batch_size=self.config.batch_size,
-            max_seconds=self.config.family_determination_max_seconds,
-        ):
-            evidence.extend(
-                self.model.infer_batch(
-                    frame_indices=frame_indices,
-                    frames=frames,
-                    source_fps=video.info.fps,
-                )
-            )
-        if not evidence:
-            raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
-
-        family, family_confidence = self._family_vote(evidence)
-        sample_frame_indices, raw_x, confidences, focus_samples = self._select_focus_series(evidence, family)
-        return self._build_shot_analysis(
-            source_media=video.path,
-            shot_id=interval.shot_id,
-            start_ms=interval.start_ms,
-            end_ms=interval.end_ms,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            source_fps=video.info.fps,
-            source_width=video.info.width,
-            source_height=video.info.height,
-            family=family,
-            family_confidence=family_confidence,
-            sample_frame_indices=sample_frame_indices,
-            raw_x=raw_x,
-            confidences=confidences,
-            focus_samples=focus_samples,
-        )
+def _frame_to_ms(frame: int, fps: float) -> int:
+    return int(round(1000.0 * frame / fps))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 BBox = Tuple[float, float, float, float]
 
@@ -13,13 +13,6 @@ class VideoInfo:
     width: int
     height: int
     duration_ms: int
-
-
-@dataclass(frozen=True)
-class ShotInterval:
-    shot_id: str
-    start_ms: int
-    end_ms: int
 
 
 @dataclass(frozen=True)

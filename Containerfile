@@ -25,6 +25,8 @@ RUN python -m pip install --upgrade pip \
 COPY src ./src
 COPY run.py ./run.py
 COPY models ./models
+COPY model-shot ./model-shot
+
 COPY scripts/verify_model_artifact.py ./scripts/verify_model_artifact.py
 
 RUN python -m pip install --no-deps . \

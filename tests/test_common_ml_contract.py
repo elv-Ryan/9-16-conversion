@@ -164,6 +164,28 @@ class ContractIntegrationTests(unittest.TestCase):
         self.assertTrue(any(isinstance(item, FakeProgressRatio) for item in output))
         self.assertIsInstance(output[-1], FakeProgress)
 
+    def test_on_completion_emits_the_final_shot(self):
+        class FakeService:
+            def finalize(self):
+                return [self_outer.analysis()]
+
+        self_outer = self
+        producer = NbaShotFocusProducer.__new__(NbaShotFocusProducer)
+        producer.config = RuntimeConfig(verify_model_sha256=False, input_mode="segment_file")
+        producer.service = FakeService()
+        output = list(producer.on_completion())
+        self.assertTrue(any(isinstance(item, FakeTag) for item in output))
+
+    def test_on_completion_is_quiet_when_nothing_is_open(self):
+        class FakeService:
+            def finalize(self):
+                return []
+
+        producer = NbaShotFocusProducer.__new__(NbaShotFocusProducer)
+        producer.config = RuntimeConfig(verify_model_sha256=False)
+        producer.service = FakeService()
+        self.assertEqual(list(producer.on_completion()), [])
+
     def test_producer_turns_file_failure_into_source_scoped_error(self):
         class BrokenService:
             def analyze_file(self, source_media):

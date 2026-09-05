@@ -51,7 +51,12 @@ class TransNetV2:
 
         return single_frame_pred[:len(frames)], all_frames_pred[:len(frames)]  # remove extra padded frames
 
-    def predict_video(self, video_fn: str):
+    def decode_video(self, video_fn: str) -> np.ndarray:
+        """Decode a file to the 48x27 RGB frames the model consumes.
+
+        Split out of predict_video so callers that stitch frames across files
+        can feed predict_frames_shots() their own buffer.
+        """
         cap = cv2.VideoCapture(video_fn)
         video = []
         while cap.isOpened():
@@ -62,19 +67,23 @@ class TransNetV2:
                 video.append(frame)
             else:
                 break
-        video = np.stack(video, axis=0)
         cap.release()
+        return np.stack(video, axis=0)
+
+    def predict_video(self, video_fn: str):
+        video = self.decode_video(video_fn)
         return (video, *self.predict_frames(torch.tensor(video).to(torch.uint8)))
 
-    def predict_shots(self, path_to_video) -> List[int]:
-        _, *predictions = self.predict_video(path_to_video)
+    def predict_frames_shots(self, frames) -> List[int]:
+        """Transition frame indices for an already-decoded clip."""
+        predictions = self.predict_frames(torch.tensor(frames).to(torch.uint8))
         predictions = torch.max(*predictions)
         predictions = (predictions > 0.5).to(torch.uint8)
-        
+
         # Collapse consecutive transitions into single shot boundaries
         shot_boundaries = []
         in_transition = False
-        
+
         for idx, val in enumerate(predictions):
             if val == 1 and not in_transition:
                 # Start of a new transition
@@ -83,12 +92,15 @@ class TransNetV2:
                 # End of transition, record the last frame
                 shot_boundaries.append(idx - 1)
                 in_transition = False
-        
+
         # Handle case where video ends during a transition
         if in_transition:
             shot_boundaries.append(len(predictions) - 1)
-        
+
         return shot_boundaries
+
+    def predict_shots(self, path_to_video) -> List[int]:
+        return self.predict_frames_shots(self.decode_video(path_to_video))
 
 class TransNetV2Model(nn.Module):
 

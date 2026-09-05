@@ -50,8 +50,8 @@ Podman qualification tests leave it disabled.
 | Requirement | Status |
 |---|---|
 | input is already one shot | PASS |
-| no shot detection in default runtime | PASS |
-| backup external shot manifest | PASS |
+| no shot detection in shot_file runtime | PASS |
+| shot boundary detection (segment_file) | PASS |
 | one custom NBA YOLO Student stream | PASS |
 | no Qwen runtime | PASS |
 | no second YOLO detector/pose pass | PASS |

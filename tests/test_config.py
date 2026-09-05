@@ -15,9 +15,32 @@ class RuntimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             config_from_params({"not_a_real_param": 1})
 
-    def test_manifest_requires_path(self):
-        with self.assertRaisesRegex(ValueError, "shot_manifest_path"):
+    def test_family_determination_default_depends_on_input_mode(self):
+        shot_file = config_from_params({"input_mode": "shot_file"})
+        segment_file = config_from_params({"input_mode": "segment_file"})
+        # shot_file inputs are whole shots, so the whole file feeds the vote.
+        self.assertEqual(shot_file.family_determination_max_seconds, 999999.0)
+        self.assertEqual(segment_file.family_determination_max_seconds, 3.0)
+
+    def test_explicit_family_determination_wins_over_the_mode_default(self):
+        config = config_from_params(
+            {"input_mode": "segment_file", "family_determination_max_seconds": 5.0}
+        )
+        self.assertEqual(config.family_determination_max_seconds, 5.0)
+
+    def test_trajectory_commit_lag_must_clear_the_detector_lookahead(self):
+        # Committing inside shot detection's lookahead could be invalidated by
+        # a cut reported late.
+        with self.assertRaisesRegex(ValueError, "trajectory_commit_lag_frames"):
+            config_from_params({"trajectory_commit_lag_frames": 10})
+        config = config_from_params({"trajectory_commit_lag_frames": 240})
+        self.assertEqual(config.trajectory_commit_lag_frames, 240)
+
+    def test_shot_manifest_mode_is_gone(self):
+        with self.assertRaisesRegex(ValueError, "input_mode"):
             config_from_params({"input_mode": "shot_manifest"})
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            config_from_params({"shot_manifest_path": "/tmp/shots.json"})
 
     def test_segment_file_input_mode_is_accepted(self):
         config = config_from_params({"input_mode": "segment_file"})

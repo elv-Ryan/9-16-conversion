@@ -10,8 +10,8 @@ NBA_YOLO_TESTS := \
 	tests/test_config.py \
 	tests/test_family_routing.py \
 	tests/test_joe_shot_filename_parser.py \
-	tests/test_manifest.py \
 	tests/test_output_validator.py \
+	tests/test_shot_pipeline.py \
 	tests/test_trajectory.py
 
 unit-test:

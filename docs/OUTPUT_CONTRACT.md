@@ -1,7 +1,10 @@
 # NBA shot-to-X output contract
 
 The container accepts newline-delimited media paths on stdin. In the default
-`shot_file` mode, each path is already one shot; no shot detection runs.
+`shot_file` mode, each path is already one shot; no shot detection runs. In
+`segment_file` mode the paths are consecutive slices of one continuous stream
+and TransNetV2 detects the shot boundaries, so a shot may span several files
+and one file may contain several shots.
 
 The production tag is written on the `vertical_video` track. Its `tag` field is
 the detected runtime family, and `additional_info.x-coordinates` contains one
@@ -51,6 +54,31 @@ Semantics:
 - `start_time` and `end_time` are milliseconds relative to this exact
   `source_media` input. There is no cross-file cumulative offset.
 - `frame_info.frame_idx` is `source_frame_start`, present on every tag.
+- A shot is emitted against the file being processed when it is cut. In
+  `segment_file` mode a shot that began in an earlier file therefore carries a
+  negative `start_time`/`source_frame_start`/`frame_idx`, measured back from
+  frame 0 of that file. `shot_file` mode always starts at 0 because each file
+  is exactly one shot.
+- `end_time` can also be negative, for the same reason. Shot detection will
+  not commit a cut until it has ~25 frames of real video after it, so a cut in
+  the last ~0.4s of a file is reported while the next file is being processed,
+  and the shot it closes lies entirely before that file. `end_time` is always
+  greater than `start_time`, and `frame_count` is always the shot's true
+  length, so resolving a shot is the same arithmetic either way.
+- Negative offsets are by design, not a degenerate case. Every offset a tag
+  carries is relative to the `source_media` it names, and the caller knows
+  where each shot/segment it fed in sits in the wider video, so it rebases
+  these onto absolute positions before storing the JSONL. The tagger's job is
+  only to keep offsets consistent with the file it names; it never needs to
+  know the absolute position itself.
+- In `segment_file` mode the trajectory is committed as segments arrive, a
+  `trajectory_commit_lag_frames` margin behind the decoded frames, instead of
+  in one pass at the end of the shot. Committed values are final. Because the
+  smoothing passes are bidirectional, a shot long enough to be committed in
+  several batches gets slightly less right-context than a single whole-shot
+  pass would (measured: ~1-2px mean, ~60px worst of 1920, at the default
+  margin). `shot_file` mode is unaffected: a shot there is always finished in
+  one pass.
 - `additional_info.focus_sample_fps` is always emitted. The per-frame
   `additional_info.focus_samples` array (one entry per sampled focus-model
   frame, at `focus_sample_fps`) is large and is only emitted when the runtime

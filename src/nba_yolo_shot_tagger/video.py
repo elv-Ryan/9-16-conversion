@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, List, Tuple
 
 import cv2
 import numpy as np
 
-from .types import ShotInterval, VideoInfo
+from .types import VideoInfo
 
 
 class VideoSource:
@@ -37,29 +37,6 @@ class VideoSource:
             duration_ms=int(round(1000.0 * frame_count / fps)),
         )
 
-    def validate_interval(self, interval: ShotInterval, max_seconds: float) -> tuple[int, int]:
-        if interval.start_ms < 0:
-            raise ValueError(f"shot {interval.shot_id}: start_ms must be >= 0")
-        if interval.end_ms <= interval.start_ms:
-            raise ValueError(f"shot {interval.shot_id}: end_ms must be > start_ms")
-        if interval.end_ms > self.info.duration_ms + 100:
-            raise ValueError(
-                f"shot {interval.shot_id}: end_ms={interval.end_ms} exceeds "
-                f"duration_ms={self.info.duration_ms}"
-            )
-        duration_seconds = (interval.end_ms - interval.start_ms) / 1000.0
-        if duration_seconds > max_seconds:
-            raise ValueError(
-                f"shot {interval.shot_id}: {duration_seconds:.3f}s exceeds "
-                f"max_shot_seconds={max_seconds}"
-            )
-        start_frame = max(0, int(round(interval.start_ms * self.info.fps / 1000.0)))
-        end_frame = min(
-            self.info.frame_count,
-            max(start_frame + 1, int(round(interval.end_ms * self.info.fps / 1000.0))),
-        )
-        return start_frame, end_frame
-
     @staticmethod
     def sample_indices(start_frame: int, end_frame: int, source_fps: float, inference_fps: float) -> List[int]:
         if end_frame <= start_frame:
@@ -81,13 +58,8 @@ class VideoSource:
         end_frame: int,
         inference_fps: float,
         batch_size: int,
-        max_seconds: Optional[float] = None,
     ) -> Iterator[Tuple[List[int], List[np.ndarray]]]:
-        effective_end_frame = end_frame
-        if max_seconds is not None:
-            cutoff_frame = start_frame + max(1, int(round(max_seconds * self.info.fps)))
-            effective_end_frame = min(end_frame, cutoff_frame)
-        targets = self.sample_indices(start_frame, effective_end_frame, self.info.fps, inference_fps)
+        targets = self.sample_indices(start_frame, end_frame, self.info.fps, inference_fps)
         if not targets:
             return
         capture = cv2.VideoCapture(self.path)

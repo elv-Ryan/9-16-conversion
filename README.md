@@ -68,14 +68,46 @@ See:
   "input_mode": "shot_file",
   "output_track": "vertical_video",
   "include_focus_samples": false,
+  "trajectory_commit_lag_frames": 120,
   "emit_focus_track": false,
   "emit_progress_ratio": false,
   "continue_on_error": true
 }
 ```
 
-Backup externally supplied shot intervals are supported with
-`input_mode=shot_manifest`; the container still does not detect shots itself.
+### Input modes
+
+Both modes run the same pipeline; they differ only in where shot boundaries
+come from.
+
+- `shot_file` (default): every stdin path is already one whole shot, so a
+  boundary is placed at the end of each file and one tag is emitted per file.
+- `segment_file`: stdin paths are consecutive slices of one continuous stream
+  (roughly 2s–60s each). TransNetV2 (`shot_model_path`) detects the cuts, so a
+  shot may span several files and one file may contain several shots. Frames
+  are carried across the joins between files so the detector never sees a
+  segment edge as a cut, which means a cut near the end of a file is only
+  reported once the next file supplies the frames after it.
+
+`family_determination_max_seconds` caps how much of a shot feeds the runtime
+family vote; the rest of the shot reuses that family. When it is not set
+explicitly it defaults to `999999` in `shot_file` mode (vote on the whole
+shot) and `3` in `segment_file` mode. A shot shorter than that is voted on
+with whatever it has.
+
+Once the family is settled the X trajectory is worked out as the segments
+arrive — catching up whatever the vote was waiting on, then keeping pace —
+rather than in one pass when the shot ends. `trajectory_commit_lag_frames`
+(default 120, ~2s) is how far behind the decoded frames it commits. It must
+clear shot detection's 25-frame lookahead so a late cut can never land in
+committed trajectory; past that it buys right-context for the bidirectional
+smoothing passes. Committed X is final and is never revised.
+
+A shot is emitted against the file being processed when it is cut, so a shot
+that began earlier carries a negative `start_time` and `frame_info.frame_idx`
+measured back from that file's frame 0. Because a cut near a file's end is
+deferred until the next file, `end_time` can be negative too. See
+`docs/OUTPUT_CONTRACT.md`.
 
 ## Clone / model / build
 

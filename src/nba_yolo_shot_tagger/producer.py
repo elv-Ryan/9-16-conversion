@@ -42,17 +42,14 @@ class NbaShotFocusProducer(TagMessageProducer):
                 )
 
     def on_completion(self) -> Iterator[Message]:
-        # segment_file mode never has a "next file" to hand a leftover shot
-        # off to; once the input stream is exhausted, flush whatever shot is
-        # still in progress instead of silently dropping it.
-        if self.config.input_mode != "segment_file":
-            return
+        # The last shot has no closing boundary: nothing follows it to trigger
+        # one. Write it out here rather than dropping it. (In shot_file mode
+        # every file closes its own shot, so there is nothing left to flush.)
         try:
-            analyses = self.service.finalize_segment_stream()
-            for analysis in analyses:
+            for analysis in self.service.finalize():
                 yield from tags_for_analysis(analysis, self.config)
         except Exception as error:
             logger.opt(exception=error).error(
-                "NBA YOLO shot tagging failed to finalize segment stream"
+                "NBA YOLO shot tagging failed to finalize the final shot"
             )
             yield Error(message=f"{type(error).__name__}: {error}")
