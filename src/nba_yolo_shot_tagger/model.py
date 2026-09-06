@@ -34,6 +34,7 @@ class YoloStudentModel:
         device: str,
         imgsz: int,
         min_confidence: float,
+        max_detections: int,
         use_fp16: bool,
     ) -> None:
         self.model_path = Path(model_path)
@@ -42,6 +43,7 @@ class YoloStudentModel:
         self.device = str(device)
         self.imgsz = int(imgsz)
         self.min_confidence = float(min_confidence)
+        self.max_detections = int(max_detections)
         self.use_fp16 = bool(use_fp16)
         self._model = None
         self._manifest = self._load_manifest()
@@ -126,23 +128,34 @@ class YoloStudentModel:
             source=list(frames),
             imgsz=self.imgsz,
             conf=self.min_confidence,
+            # The end-to-end head hands back its top-k regardless of quality,
+            # and its own default k is 300. Without both of these the whole
+            # tail arrives and every downstream consumer has to carry it.
+            max_det=self.max_detections,
             device=self.device,
             verbose=False,
             save=False,
             stream=False,
         )
-        # Upstream Ultralytics uses ``half``; the internal YOLO26 runtime used
-        # during development renamed this control to ``quantize``. Support both
-        # without changing the one-pass model contract.
+        # Ultralytics renamed this control from ``half`` to ``quantize`` and
+        # now warns on every call that ``half`` is going away. On the pinned
+        # build the two are bit-identical over real frames, so prefer the name
+        # that has a future and keep ``half`` only for older runtimes.
+        #
+        # The order matters more than it looks: Ultralytics rejects an unknown
+        # argument with SyntaxError from its own argument checker, not
+        # TypeError, so the removal this deprecation promises would not have
+        # been caught by the previous handler at all -- it would have taken the
+        # daemon down on the first frame after an upgrade.
         try:
-            return self._model.predict(half=self.use_fp16, **common)
-        except (TypeError, ValueError) as error:
-            if "half" not in str(error).lower() and "quantize" not in str(error).lower():
-                raise
             return self._model.predict(
                 quantize=16 if self.use_fp16 and self.device != "cpu" else 32,
                 **common,
             )
+        except (TypeError, ValueError, SyntaxError) as error:
+            if "quantize" not in str(error).lower():
+                raise
+            return self._model.predict(half=self.use_fp16, **common)
 
     def infer_batch(
         self,

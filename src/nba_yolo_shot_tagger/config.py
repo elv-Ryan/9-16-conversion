@@ -42,12 +42,40 @@ class RuntimeConfig:
     imgsz: int = 1280
     inference_fps: float = 10.0
     batch_size: int = 8
-    min_detection_confidence: float = 0.001
+    # The checkpoint's head is end-to-end (NMS-free) and returns its top
+    # ``max_detections`` boxes regardless of quality, so this floor is the only
+    # thing standing between the family vote and a hundred noise boxes per
+    # frame. Both are passed straight through to predict().
+    #
+    # 0.05 is measured, not guessed: over 3,150 sampled frames of test-files
+    # this checkpoint returns 96 boxes per frame at the old 0.001 floor, whose
+    # x-centres are spread over 0.73 of the frame -- they agree on nothing. At
+    # 0.05 that falls to 2.3 boxes per frame spread over 0.011, 78% of frames
+    # still carry a box, and the family vote changes on 1 file in 150. Raising
+    # it further starts costing real evidence: 0.15 leaves only 43% of frames
+    # with any box and flips 19% of the votes. The checkpoint's confidences are
+    # compressed (p50 = 0.002, p99 = 0.10), so this is a low number by design.
+    min_detection_confidence: float = 0.05
+    # Applied as top-k by score before the confidence filter, so it can only
+    # ever discard boxes the floor would have dropped anyway: at 0.05 no frame
+    # in the sample kept more than 15 boxes.
+    max_detections: int = 20
     use_fp16: bool = True
     live_data_stream: str = ""
 
     input_mode: str = "shot_file"
     max_shot_seconds: float = 900.0
+    # TransNetV2's per-frame prediction flickers across a dissolve, and
+    # predict_frames_shots() collapses only strictly consecutive positives, so
+    # one soft transition can report several boundaries a few frames apart.
+    # Ninety consecutive segments produced two shots of 34 ms and 66 ms this
+    # way, each carrying a full family vote taken on two frames of evidence. A
+    # cut closer than this to the start of the open shot is dropped and its
+    # frames are absorbed into the following shot.
+    #
+    # Only segment_file detects its own cuts. shot_file boundaries are declared
+    # by the caller, so they are always honoured however short the file is.
+    min_shot_seconds: float = 0.25
     # Resolved per input_mode in __post_init__ when not supplied explicitly.
     family_determination_max_seconds: Optional[float] = None
     # How far behind the decoded frames the X trajectory is committed, in
@@ -121,11 +149,18 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
         "include_focus_samples",
         "emit_progress_ratio",
     }
-    int_fields = {"imgsz", "batch_size", "coordinate_decimals", "trajectory_commit_lag_frames"}
+    int_fields = {
+        "imgsz",
+        "batch_size",
+        "coordinate_decimals",
+        "trajectory_commit_lag_frames",
+        "max_detections",
+    }
     number_fields = {
         "inference_fps",
         "min_detection_confidence",
         "max_shot_seconds",
+        "min_shot_seconds",
         "family_determination_max_seconds",
         "target_aspect_width_over_height",
     }
@@ -157,8 +192,16 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("inference_fps must be in (0, 120]")
     if not (0.0 <= config.min_detection_confidence < 1.0):
         raise ValueError("min_detection_confidence must be in [0, 1)")
+    if config.max_detections < 1 or config.max_detections > 300:
+        # 300 is the checkpoint's own Detect.max_det; asking for more is a
+        # silent no-op rather than an error, so reject it here.
+        raise ValueError("max_detections must be between 1 and 300")
     if not (0.1 <= config.max_shot_seconds <= 7200.0):
         raise ValueError("max_shot_seconds must be between 0.1 and 7200")
+    if not (0.0 <= config.min_shot_seconds <= 10.0):
+        raise ValueError("min_shot_seconds must be between 0 and 10")
+    if config.min_shot_seconds >= config.max_shot_seconds:
+        raise ValueError("min_shot_seconds must be below max_shot_seconds")
     if not (0.1 <= config.family_determination_max_seconds <= 1_000_000.0):
         raise ValueError("family_determination_max_seconds must be between 0.1 and 1000000")
     if config.trajectory_commit_lag_frames < SHOT_DETECTION_LOOKAHEAD_FRAMES:

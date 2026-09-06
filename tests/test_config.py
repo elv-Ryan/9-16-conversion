@@ -50,6 +50,31 @@ class RuntimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "input_mode"):
             config_from_params({"input_mode": "not_a_real_mode"})
 
+    def test_detection_gate_has_both_a_floor_and_a_cap(self):
+        # The checkpoint's head is NMS-free and returns its top-k whatever the
+        # scores are, so a floor without a cap still admits the whole tail.
+        config = config_from_params({})
+        self.assertEqual(config.min_detection_confidence, 0.05)
+        self.assertEqual(config.max_detections, 20)
+
+    def test_max_detections_is_bounded_by_the_checkpoint_head(self):
+        with self.assertRaisesRegex(ValueError, "max_detections"):
+            config_from_params({"max_detections": 0})
+        with self.assertRaisesRegex(ValueError, "max_detections"):
+            config_from_params({"max_detections": 301})
+        with self.assertRaisesRegex(ValueError, "max_detections"):
+            config_from_params({"max_detections": 20.0})
+        self.assertEqual(config_from_params({"max_detections": 300}).max_detections, 300)
+
+    def test_min_shot_seconds_is_bounded_and_below_max(self):
+        self.assertEqual(config_from_params({}).min_shot_seconds, 0.25)
+        with self.assertRaisesRegex(ValueError, "min_shot_seconds"):
+            config_from_params({"min_shot_seconds": -1.0})
+        with self.assertRaisesRegex(ValueError, "min_shot_seconds"):
+            config_from_params({"min_shot_seconds": 11.0})
+        with self.assertRaisesRegex(ValueError, "below max_shot_seconds"):
+            config_from_params({"min_shot_seconds": 5.0, "max_shot_seconds": 1.0})
+
     def test_json_types_are_strict(self):
         with self.assertRaisesRegex(ValueError, "batch_size"):
             config_from_params({"batch_size": "8"})

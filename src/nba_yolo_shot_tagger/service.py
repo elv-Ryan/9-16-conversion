@@ -33,6 +33,25 @@ CATEGORY_BY_FAMILY = {
 # growing with the length of the open shot.
 SMOOTHING_CONTEXT_SAMPLES = 64
 
+# Focus selection is otherwise a memoryless argmax, which makes it decided by
+# whichever near-tied box the detector happened to score highest. That is not a
+# hypothetical: running the same frames in fp16 and fp32 flips the winner on a
+# small number of them, once moving the crop by 0.34 of the frame off a
+# confidence difference of 1e-4 (0.1366 against 0.1365). Between consecutive
+# samples of a real shot the same tie-break fires far more often.
+#
+# So among the boxes that are statistically tied with the best one, prefer the
+# one nearest to where the crop already is. A candidate must reach this
+# fraction of the best confidence to count as tied -- below it the detector has
+# a real preference and continuity must not override it.
+FOCUS_TIE_FRACTION = 0.75
+# Beyond this normalized distance the "continuity" would be fictional: the
+# nearest tied box is nowhere near the previous one, so take the best instead.
+FOCUS_LINK_MAX_DISTANCE = 0.25
+# Samples of absence after which the anchor is stale and linking stops. At the
+# default 10 fps inference rate this is one second.
+FOCUS_LINK_MAX_GAP_SAMPLES = 10
+
 
 class ShotFocusService:
     """One pipeline for both input modes.
@@ -72,6 +91,7 @@ class ShotFocusService:
             device=config.device,
             imgsz=config.imgsz,
             min_confidence=config.min_detection_confidence,
+            max_detections=config.max_detections,
             use_fp16=config.use_fp16,
         )
 
@@ -87,9 +107,13 @@ class ShotFocusService:
             )
             # Only segment_file defers cuts, so only it has to hold back.
             self._commit_lag = config.trajectory_commit_lag_frames
+            # ...and only it invents its own boundaries, so only it has to
+            # defend against a flickering one.
+            self._min_shot_seconds = config.min_shot_seconds
         else:
             self.shot_detector = None
             self._commit_lag = 0
+            self._min_shot_seconds = 0.0
 
         self._shot_index = 0
         self._abs_frames = 0  # source frames folded so far, across all files
@@ -128,7 +152,7 @@ class ShotFocusService:
                 analysis = self._close(self._last_abs_start + relative_cut)
                 if analysis is not None:
                     completed.append(analysis)
-        analysis = self._close(self._abs_frames)
+        analysis = self._close(self._abs_frames, force=True)
         if analysis is not None:
             completed.append(analysis)
         return completed
@@ -193,7 +217,7 @@ class ShotFocusService:
         if (self._abs_ms - self._cycle_start_abs_ms) / 1000.0 >= self.config.max_shot_seconds:
             # Safety valve: an open shot is held in memory, and a stream can
             # run a long way without a detected cut.
-            analysis = self._close(self._abs_frames)
+            analysis = self._close(self._abs_frames, force=True)
             if analysis is not None:
                 completed.append(analysis)
         return completed
@@ -219,17 +243,30 @@ class ShotFocusService:
         self._abs_frames = abs_start + info.frame_count
         self._abs_ms = abs_start_ms + info.duration_ms
 
-    def _close(self, cut_abs: int) -> Optional[ShotAnalysis]:
+    def _close(self, cut_abs: int, *, force: bool = False) -> Optional[ShotAnalysis]:
         """Cut the open shot at an absolute stream frame and emit it.
 
         The shot is emitted against the file currently being processed, so a
         cut that lands before that file starts (one the detector deferred)
         simply produces a more negative offset.
+
+        A cut that would carve off less than ``min_shot_seconds`` is dropped
+        instead: a two-frame shot is a flickering transition, not a shot, and
+        emitting one costs a family voted on two frames of evidence and a
+        30 ms crop instruction for the consumer to honour. The frames are not
+        lost -- the cycle stays open and they join the following shot. ``force``
+        is for closes that are not cuts at all (the final flush, the
+        max_shot_seconds valve), where there is no following shot to join.
         """
         length = cut_abs - self._cycle_start_abs
         if length <= 0:
             return None
         info = self._last_video_info
+        if (
+            not force
+            and _frame_to_ms(length, info.fps) < 1000.0 * self._min_shot_seconds
+        ):
+            return None
         anchor_abs = self._last_abs_start
         anchor_abs_ms = self._last_abs_start_ms
 
@@ -299,6 +336,11 @@ class ShotFocusService:
         self._cycle_focus: List[FocusSample] = []
         self._cycle_smoothed: List[float] = []
         self._cycle_static_lock: Optional[float] = None
+        # Where the focus was last actually observed, and how many samples ago,
+        # so association survives a batch boundary the way smoothing context
+        # does. Cleared here because a new shot has no continuity with the old.
+        self._cycle_focus_anchor: Optional[float] = None
+        self._cycle_focus_gap = 0
         self.current_family: Optional[str] = None
         self.current_family_confidence: Optional[float] = None
 
@@ -389,13 +431,44 @@ class ShotFocusService:
         return family, scores[family] / total if total > 0.0 else 0.0
 
     @staticmethod
-    def _select_focus(frame: FrameEvidence, family: str) -> Optional[Candidate]:
+    def _select_focus(
+        frame: FrameEvidence,
+        family: str,
+        *,
+        anchor_x: Optional[float] = None,
+    ) -> Optional[Candidate]:
+        """The best box of the shot's own family, or nothing at all.
+
+        A frame the voted family did not fire on is a gap, not an opportunity
+        to use some other family's box: substituting one moves the crop onto a
+        subject the shot is not about -- a graphic_text_lock box steering a
+        gameplay_follow shot, say -- and does it silently, because the sample
+        still looks like evidence downstream. Returning None instead lets
+        _fill_missing interpolate across the gap from the neighbouring real
+        observations of the right family.
+
+        ``anchor_x`` is where the focus was last observed. When several boxes
+        of the family are within FOCUS_TIE_FRACTION of the best confidence,
+        the detector has expressed no real preference between them, and the
+        raw argmax would hand the choice to numerical noise -- so the one
+        nearest the anchor wins instead. A box the detector genuinely prefers
+        still wins outright, which is what lets the focus move to a new
+        subject rather than sticking to the first one it ever saw.
+        """
         matching = [candidate for candidate in frame.candidates if candidate.family == family]
-        if matching:
-            return max(matching, key=lambda item: item.confidence)
-        if frame.candidates:
-            return max(frame.candidates, key=lambda item: item.confidence)
-        return None
+        if not matching:
+            return None
+        best = max(matching, key=lambda item: item.confidence)
+        if anchor_x is None or len(matching) == 1:
+            return best
+        floor = best.confidence * FOCUS_TIE_FRACTION
+        tied = [candidate for candidate in matching if candidate.confidence >= floor]
+        if len(tied) == 1:
+            return best
+        nearest = min(tied, key=lambda item: abs(item.x_center - anchor_x))
+        if abs(nearest.x_center - anchor_x) > FOCUS_LINK_MAX_DISTANCE:
+            return best
+        return nearest
 
     def _select_focus_series(
         self, evidence: Sequence[FrameEvidence], family: str
@@ -404,10 +477,19 @@ class ShotFocusService:
         raw_x: List[Optional[float]] = []
         confidences: List[float] = []
         focus_samples: List[FocusSample] = []
+        # Carried across batches, so a segment boundary does not reset the
+        # association the way it must not reset the smoothing context.
+        anchor_x = self._cycle_focus_anchor
+        gap = self._cycle_focus_gap
         for frame in evidence:
-            selected = self._select_focus(frame, family)
+            selected = self._select_focus(frame, family, anchor_x=anchor_x)
             sample_frame_indices.append(frame.frame_index)
             if selected is None:
+                gap += 1
+                if gap > FOCUS_LINK_MAX_GAP_SAMPLES:
+                    # The subject has been gone long enough that where it used
+                    # to be says nothing about where it is now.
+                    anchor_x = None
                 raw_x.append(None)
                 confidences.append(0.0)
                 focus_samples.append(
@@ -421,6 +503,8 @@ class ShotFocusService:
                     )
                 )
             else:
+                anchor_x = selected.x_center
+                gap = 0
                 raw_x.append(selected.x_center)
                 confidences.append(selected.confidence)
                 focus_samples.append(
@@ -433,6 +517,8 @@ class ShotFocusService:
                         raw_x_center_norm=selected.x_center,
                     )
                 )
+        self._cycle_focus_anchor = anchor_x
+        self._cycle_focus_gap = gap
         return sample_frame_indices, raw_x, confidences, focus_samples
 
     # ------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import unittest
 
 from nba_yolo_shot_tagger.config import RuntimeConfig
+from nba_yolo_shot_tagger.live import NoopSink
 from nba_yolo_shot_tagger.service import ShotFocusService
 from nba_yolo_shot_tagger.trajectory import (
     expand_to_source_frames,
@@ -65,9 +66,13 @@ def _service(input_mode: str, detector=None, **overrides) -> ShotFocusService:
     service = ShotFocusService.__new__(ShotFocusService)
     service.config = RuntimeConfig(verify_model_sha256=False, input_mode=input_mode, **overrides)
     service.model = _FakeModel()
+    service.x_sink = NoopSink()
     service.shot_detector = detector
     service._commit_lag = (
         service.config.trajectory_commit_lag_frames if input_mode == "segment_file" else 0
+    )
+    service._min_shot_seconds = (
+        service.config.min_shot_seconds if input_mode == "segment_file" else 0.0
     )
     service._shot_index = 0
     service._abs_frames = 0
@@ -288,6 +293,42 @@ class SegmentFileModeTests(unittest.TestCase):
         completed = _feed(service, "f0.mp4")
         self.assertEqual([shot.shot_id for shot in completed], ["shot_000000", "shot_000001"])
 
+
+
+class MinimumShotLengthTests(unittest.TestCase):
+    def test_a_flickering_transition_does_not_emit_micro_shots(self):
+        # TransNetV2 reporting three boundaries a few frames apart across one
+        # dissolve. Only the first is a shot boundary; the rest are the same
+        # transition, and their frames belong to the shot that follows.
+        detector = _FakeDetector({"a.mp4": [], "b.mp4": [10, 12, 16]})
+        service = _service("segment_file", detector=detector)
+        completed = _feed(service, "a.mp4", "b.mp4")
+        self.assertEqual(len(completed), 1)
+        shot = completed[0]
+        # One shot ending at the first cut, not three ending 2 and 4 frames on.
+        self.assertEqual(shot.start_frame, -FRAME_COUNT)
+        self.assertEqual(shot.frame_count, FRAME_COUNT + 10)
+        # The absorbed frames are not lost: they open the next shot, which the
+        # final flush closes.
+        remaining = service.finalize()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].frame_count, 2 * FRAME_COUNT - (FRAME_COUNT + 10))
+
+    def test_shot_file_boundaries_are_honoured_however_short(self):
+        # The caller declared these boundaries; the guard is only a defence
+        # against a detector inventing its own.
+        service = _service("shot_file")
+        self.assertEqual(service._min_shot_seconds, 0.0)
+
+    def test_a_short_final_shot_is_still_emitted(self):
+        # Nothing follows the last shot, so there is nothing for it to be
+        # absorbed into. It has to come out however short it is.
+        detector = _FakeDetector({"a.mp4": [FRAME_COUNT - 4]})
+        service = _service("segment_file", detector=detector)
+        _feed(service, "a.mp4")
+        remaining = service.finalize()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].frame_count, 4)
 
 if __name__ == "__main__":
     unittest.main()
