@@ -9,6 +9,6 @@ export DESCRIPTION="Eluvio shot-in NBA YOLO family/focus tagger emitting normali
 
 
 exec buildscripts/build_container.bash \
-  -t "verticalvideo-v2:${IMAGE_TAG:-latest}" \
+  -t "verticalvideo-v2.5:${IMAGE_TAG:-latest}" \
   -f Containerfile \
   .

@@ -69,6 +69,8 @@ See:
   "use_fp16": true,
   "input_mode": "shot_file",
   "min_shot_seconds": 0.25,
+  "hold_and_cut_families": "active_speaker",
+  "min_hold_seconds": 0.7,
   "output_track": "vertical_video",
   "include_focus_samples": false,
   "trajectory_commit_lag_frames": 120,

@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .config import RuntimeConfig
+from .config import RuntimeConfig, parse_hold_and_cut_families
 from .model import YoloStudentModel
 from .trajectory import (
     STATIC_FAMILIES,
@@ -105,15 +105,9 @@ class ShotFocusService:
                 config.shot_model_path,
                 device="cpu" if config.device == "cpu" else None,
             )
-            # Only segment_file defers cuts, so only it has to hold back.
-            self._commit_lag = config.trajectory_commit_lag_frames
-            # ...and only it invents its own boundaries, so only it has to
-            # defend against a flickering one.
-            self._min_shot_seconds = config.min_shot_seconds
         else:
             self.shot_detector = None
-            self._commit_lag = 0
-            self._min_shot_seconds = 0.0
+        self._apply_config()
 
         self._shot_index = 0
         self._abs_frames = 0  # source frames folded so far, across all files
@@ -123,6 +117,25 @@ class ShotFocusService:
         self._last_abs_start = 0
         self._last_abs_start_ms = 0
         self._reset_cycle(0, 0)
+
+    def _apply_config(self) -> None:
+        """Everything derived from RuntimeConfig, in one place.
+
+        Kept separate from __init__ because __init__ also loads a checkpoint
+        and, in segment_file mode, TransNetV2. Tests build the service through
+        __new__ to skip that, and they should not have to know which derived
+        fields exist -- adding one here must not break them.
+        """
+        config = self.config
+        segmenting = config.input_mode == "segment_file"
+        # Only segment_file defers cuts, so only it has to hold back...
+        self._commit_lag = config.trajectory_commit_lag_frames if segmenting else 0
+        # ...and only it invents its own boundaries, so only it has to defend
+        # against a flickering one.
+        self._min_shot_seconds = config.min_shot_seconds if segmenting else 0.0
+        self._hold_and_cut_families = parse_hold_and_cut_families(
+            config.hold_and_cut_families
+        )
 
     @property
     def shot_state(self) -> str:
@@ -400,6 +413,8 @@ class ShotFocusService:
             inference_fps=self.config.inference_fps,
             legal_min=legal_min,
             legal_max=legal_max,
+            hold_and_cut=self.current_family in self._hold_and_cut_families,
+            min_hold_seconds=self.config.min_hold_seconds,
         )
         values = [float(value) for value in smoothed[first_new - window_start :]]
         if self.current_family in STATIC_FAMILIES and values:

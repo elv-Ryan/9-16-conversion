@@ -1,4 +1,4 @@
-IMAGE_NAME := verticalvideo-v2
+IMAGE_NAME := verticalvideo-v2.5
 PYTHON ?= python3
 
 include buildscripts/Makefile.tagger-model

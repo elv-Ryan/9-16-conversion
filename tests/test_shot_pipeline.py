@@ -68,12 +68,7 @@ def _service(input_mode: str, detector=None, **overrides) -> ShotFocusService:
     service.model = _FakeModel()
     service.x_sink = NoopSink()
     service.shot_detector = detector
-    service._commit_lag = (
-        service.config.trajectory_commit_lag_frames if input_mode == "segment_file" else 0
-    )
-    service._min_shot_seconds = (
-        service.config.min_shot_seconds if input_mode == "segment_file" else 0.0
-    )
+    service._apply_config()
     service._shot_index = 0
     service._abs_frames = 0
     service._abs_ms = 0

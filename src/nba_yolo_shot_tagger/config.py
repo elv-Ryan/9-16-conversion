@@ -5,6 +5,18 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 
+# Kept in step with model.EXPECTED_FAMILIES, but named here too so config
+# validation does not have to import the model module (and with it numpy).
+EXPECTED_FAMILIES = (
+    "active_speaker",
+    "gameplay_follow",
+    "graphic_text_lock",
+    "person_subject",
+    "safe_center",
+    "split_screen",
+    "static_composition",
+)
+
 DEFAULT_MODEL_PATH = "models/nba_yolo_student/best.pt"
 DEFAULT_MODEL_MANIFEST_PATH = "models/nba_yolo_student/model_manifest.json"
 DEFAULT_SHOT_MODEL_PATH = "models/shot/transnetv2/torch_transnetv2.pth"
@@ -15,7 +27,7 @@ DEFAULT_SHOT_MODEL_PATH = "models/shot/transnetv2/torch_transnetv2.pth"
 # rest of the shot.
 DEFAULT_FAMILY_DETERMINATION_MAX_SECONDS = {
     "shot_file": 999999.0,
-    "segment_file": 3.0,
+    "segment_file": 4.0,
 }
 
 # TransNetV2 keeps the middle 50 predictions of each 100-frame window, so it
@@ -75,7 +87,7 @@ class RuntimeConfig:
     #
     # Only segment_file detects its own cuts. shot_file boundaries are declared
     # by the caller, so they are always honoured however short the file is.
-    min_shot_seconds: float = 0.25
+    min_shot_seconds: float = 0.75
     # Resolved per input_mode in __post_init__ when not supplied explicitly.
     family_determination_max_seconds: Optional[float] = None
     # How far behind the decoded frames the X trajectory is committed, in
@@ -83,7 +95,18 @@ class RuntimeConfig:
     # can never land in committed trajectory; beyond that it buys smoothing
     # right-context, which the bidirectional passes need, at the cost of
     # leaving more of a shot to be finished when it closes.
-    trajectory_commit_lag_frames: int = 120
+    trajectory_commit_lag_frames: int = 240
+
+    # Families whose trajectory holds one framing and cuts, instead of being
+    # continuously smoothed. Comma-separated so it can be retargeted through
+    # --params without a rebuild: interviews are meant to land on
+    # ``active_speaker``, but if this checkpoint votes them ``person_subject``
+    # the same treatment is one deploy-time edit away.
+    hold_and_cut_families: str = "active_speaker"
+    # How long a subject must hold the framing before a change of subject is
+    # accepted as a cut. Shorter reads as restless; longer misses real
+    # exchanges. Interview cutting rarely goes faster than about a second.
+    min_hold_seconds: float = 1.0
 
     output_track: str = "vertical_video"
     focus_track: str = "focus"
@@ -161,6 +184,7 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
         "min_detection_confidence",
         "max_shot_seconds",
         "min_shot_seconds",
+        "min_hold_seconds",
         "family_determination_max_seconds",
         "target_aspect_width_over_height",
     }
@@ -213,12 +237,22 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("target_aspect_width_over_height is invalid")
     if not (0 <= config.coordinate_decimals <= 9):
         raise ValueError("coordinate_decimals must be between 0 and 9")
+    if not (0.0 <= config.min_hold_seconds <= 30.0):
+        raise ValueError("min_hold_seconds must be between 0 and 30")
+    unknown_families = sorted(parse_hold_and_cut_families(config.hold_and_cut_families) - set(EXPECTED_FAMILIES))
+    if unknown_families:
+        raise ValueError(f"hold_and_cut_families contains unknown families: {unknown_families}")
     if config.input_mode not in {"shot_file", "segment_file"}:
         raise ValueError("input_mode must be 'shot_file' or 'segment_file'")
     if not config.output_track.strip():
         raise ValueError("output_track must be non-empty")
     if config.emit_focus_track and not config.focus_track.strip():
         raise ValueError("focus_track must be non-empty when emit_focus_track=true")
+
+
+def parse_hold_and_cut_families(raw: str) -> set:
+    """Comma-separated family names, tolerant of spaces and a trailing comma."""
+    return {piece.strip() for piece in str(raw).split(",") if piece.strip()}
 
 
 def resolve_runtime_path(path: str, repo_root: Optional[Path] = None) -> Path:
