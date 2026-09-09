@@ -75,7 +75,7 @@ class RuntimeConfig:
     use_fp16: bool = True
     live_data_stream: str = ""
 
-    input_mode: str = "shot_file"
+    input_mode: str = "segment_file"
     max_shot_seconds: float = 900.0
     # TransNetV2's per-frame prediction flickers across a dissolve, and
     # predict_frames_shots() collapses only strictly consecutive positives, so
