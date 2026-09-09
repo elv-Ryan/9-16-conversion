@@ -27,7 +27,7 @@ DEFAULT_SHOT_MODEL_PATH = "models/shot/transnetv2/torch_transnetv2.pth"
 # rest of the shot.
 DEFAULT_FAMILY_DETERMINATION_MAX_SECONDS = {
     "shot_file": 999999.0,
-    "segment_file": 4.0,
+    "segment_file": 5.0,
 }
 
 # TransNetV2 keeps the middle 50 predictions of each 100-frame window, so it
@@ -95,7 +95,7 @@ class RuntimeConfig:
     # can never land in committed trajectory; beyond that it buys smoothing
     # right-context, which the bidirectional passes need, at the cost of
     # leaving more of a shot to be finished when it closes.
-    trajectory_commit_lag_frames: int = 240
+    trajectory_commit_lag_frames: int = 300
 
     # Families whose trajectory holds one framing and cuts, instead of being
     # continuously smoothed. Comma-separated so it can be retargeted through
