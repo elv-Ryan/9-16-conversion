@@ -1,222 +1,60 @@
 from __future__ import annotations
-
-from collections import defaultdict
-from dataclasses import asdict
-import json
+from collections import Counter,defaultdict
+import json,re
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
-import numpy as np
-
+from typing import Dict,List
 from .config import RuntimeConfig
-from .model import EXPECTED_FAMILIES, YoloStudentModel
-from .trajectory import expand_to_source_frames, legal_crop_geometry, smooth_samples
-from .types import Candidate, FocusSample, FrameEvidence, ShotAnalysis, ShotInterval
+from .model import EXPECTED_FAMILIES,YoloStudentModel
+from .reviewed_runtime import ReviewedRound01Runtime,reconstruct_source_frames
+from .types import FocusSample,FrameEvidence,ShotAnalysis,ShotInterval
 from .video import VideoSource
 
-
-CATEGORY_BY_FAMILY = {
-    "active_speaker": "talking",
-    "gameplay_follow": "gameplay",
-    "graphic_text_lock": "graphic",
-    "person_subject": "person",
-    "safe_center": "other",
-    "split_screen": "split_screen",
-    "static_composition": "static",
-}
-
-
 class ShotManifest:
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        if not self.path.is_file():
-            raise FileNotFoundError(f"shot manifest missing: {self.path}")
-        self.payload = json.loads(self.path.read_text(encoding="utf-8"))
-
+    def __init__(self,path:str):self.payload=json.loads(Path(path).read_text())
     @staticmethod
-    def _parse_list(items: object, source_media: str) -> List[ShotInterval]:
-        if not isinstance(items, list):
-            raise ValueError(f"shot manifest entry for {source_media!r} must be a list")
-        intervals: List[ShotInterval] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                raise ValueError(f"shot manifest item {index} must be an object")
-            start = item.get("start_ms")
-            end = item.get("end_ms")
-            if isinstance(start, bool) or not isinstance(start, int):
-                raise ValueError(f"shot manifest item {index}.start_ms must be an integer")
-            if isinstance(end, bool) or not isinstance(end, int):
-                raise ValueError(f"shot manifest item {index}.end_ms must be an integer")
-            shot_id = str(item.get("shot_id", f"shot_{index:06d}"))
-            intervals.append(ShotInterval(shot_id=shot_id, start_ms=start, end_ms=end))
-        return intervals
+    def _parse(items):
+        out=[]
+        for i,x in enumerate(items):out.append(ShotInterval(str(x.get('shot_id',f'shot_{i:06d}')),int(x['start_ms']),int(x['end_ms'])))
+        return out
+    def intervals_for(self,source):
+        p=self.payload
+        if isinstance(p,list):return self._parse(p)
+        if 'shots' in p:return self._parse(p['shots'])
+        for k in (source,str(Path(source).resolve()),Path(source).name):
+            if k in p:return self._parse(p[k])
+        raise ValueError(f'no shot manifest entry for {source}')
 
-    def intervals_for(self, source_media: str) -> List[ShotInterval]:
-        payload = self.payload
-        if isinstance(payload, list):
-            return self._parse_list(payload, source_media)
-        if not isinstance(payload, dict):
-            raise ValueError("shot manifest root must be a list or object")
-        if "shots" in payload:
-            return self._parse_list(payload["shots"], source_media)
-        candidates = [source_media, str(Path(source_media).resolve()), Path(source_media).name]
-        for key in candidates:
-            if key in payload:
-                return self._parse_list(payload[key], source_media)
-        raise ValueError(f"shot manifest has no entry for source media: {source_media}")
-
+def _source_iq(path:str,override:str)->str:
+    if override:return override
+    m=re.search(r'iq__[A-Za-z0-9]+',path)
+    return m.group(0) if m else ''
 
 class ShotFocusService:
-    def __init__(self, config: RuntimeConfig) -> None:
-        self.config = config
-        self.model = YoloStudentModel(
-            model_path=config.model_path,
-            manifest_path=config.model_manifest_path,
-            verify_sha256=config.verify_model_sha256,
-            device=config.device,
-            imgsz=config.imgsz,
-            min_confidence=config.min_detection_confidence,
-            use_fp16=config.use_fp16,
-        )
-        self.manifest = ShotManifest(config.shot_manifest_path) if config.input_mode == "shot_manifest" else None
-
-    def intervals_for(self, video: VideoSource) -> List[ShotInterval]:
-        if self.manifest is not None:
-            return self.manifest.intervals_for(video.path)
-        return [
-            ShotInterval(
-                shot_id="shot_000000",
-                start_ms=0,
-                end_ms=video.info.duration_ms,
-            )
-        ]
-
-    @staticmethod
-    def _family_vote(evidence: Sequence[FrameEvidence]) -> tuple[str, float]:
-        scores: Dict[str, float] = defaultdict(float)
-        for frame in evidence:
-            best_per_family: Dict[str, float] = {}
-            for candidate in frame.candidates:
-                best_per_family[candidate.family] = max(
-                    best_per_family.get(candidate.family, 0.0),
-                    candidate.confidence,
-                )
-            for family, confidence in best_per_family.items():
-                if family == "safe_center":
-                    continue
-                scores[family] += max(0.001, confidence) ** 1.5
-        if not scores:
-            return "safe_center", 1.0
-        family = max(scores, key=scores.get)
-        total = sum(scores.values())
-        return family, scores[family] / total if total > 0.0 else 0.0
-
-    @staticmethod
-    def _select_focus(frame: FrameEvidence, family: str) -> Optional[Candidate]:
-        matching = [candidate for candidate in frame.candidates if candidate.family == family]
-        if matching:
-            return max(matching, key=lambda item: item.confidence)
-        if frame.candidates:
-            return max(frame.candidates, key=lambda item: item.confidence)
-        return None
-
-    def analyze_file(self, source_media: str) -> List[ShotAnalysis]:
-        video = VideoSource(source_media)
-        analyses: List[ShotAnalysis] = []
-        for interval in self.intervals_for(video):
-            analyses.append(self._analyze_interval(video, interval))
-        return analyses
-
-    def _analyze_interval(self, video: VideoSource, interval: ShotInterval) -> ShotAnalysis:
-        start_frame, end_frame = video.validate_interval(interval, self.config.max_shot_seconds)
-        evidence: List[FrameEvidence] = []
-        for frame_indices, frames in video.iter_sample_batches(
-            start_frame=start_frame,
-            end_frame=end_frame,
-            inference_fps=self.config.inference_fps,
-            batch_size=self.config.batch_size,
-        ):
-            evidence.extend(
-                self.model.infer_batch(
-                    frame_indices=frame_indices,
-                    frames=frames,
-                    source_fps=video.info.fps,
-                )
-            )
-        if not evidence:
-            raise ValueError(f"shot {interval.shot_id} produced no decodable frames")
-
-        family, family_confidence = self._family_vote(evidence)
-        focus_samples: List[FocusSample] = []
-        raw_x: List[Optional[float]] = []
-        confidences: List[float] = []
-        sample_frame_indices: List[int] = []
-        for frame in evidence:
-            selected = self._select_focus(frame, family)
-            sample_frame_indices.append(frame.frame_index)
-            if selected is None:
-                raw_x.append(None)
-                confidences.append(0.0)
-                focus_samples.append(
-                    FocusSample(
-                        frame_index=frame.frame_index,
-                        timestamp_ms=frame.timestamp_ms,
-                        family="safe_center",
-                        confidence=0.0,
-                        bbox=None,
-                        raw_x_center_norm=None,
-                    )
-                )
-            else:
-                raw_x.append(selected.x_center)
-                confidences.append(selected.confidence)
-                focus_samples.append(
-                    FocusSample(
-                        frame_index=frame.frame_index,
-                        timestamp_ms=frame.timestamp_ms,
-                        family=selected.family,
-                        confidence=selected.confidence,
-                        bbox=selected.bbox,
-                        raw_x_center_norm=selected.x_center,
-                    )
-                )
-
-        crop_width, legal_min, legal_max = legal_crop_geometry(
-            video.info.width,
-            video.info.height,
-            self.config.target_aspect_width_over_height,
-        )
-        sample_x = smooth_samples(
-            family=family,
-            raw_x=raw_x,
-            confidences=confidences,
-            inference_fps=self.config.inference_fps,
-            legal_min=legal_min,
-            legal_max=legal_max,
-        )
-        expanded = expand_to_source_frames(
-            sample_frame_indices=sample_frame_indices,
-            sample_x=sample_x,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            legal_min=legal_min,
-            legal_max=legal_max,
-        )
-        return ShotAnalysis(
-            source_media=video.path,
-            shot_id=interval.shot_id,
-            start_ms=interval.start_ms,
-            end_ms=interval.end_ms,
-            start_frame=start_frame,
-            frame_count=end_frame - start_frame,
-            source_fps=video.info.fps,
-            source_width=video.info.width,
-            source_height=video.info.height,
-            family=family,
-            category=CATEGORY_BY_FAMILY.get(family, "other"),
-            family_confidence=family_confidence,
-            crop_width_norm=crop_width,
-            x_coordinates=tuple(float(value) for value in expanded),
-            focus_samples=tuple(focus_samples),
-            model=self.model.identity,
-        )
+    def __init__(self,config:RuntimeConfig):
+        self.config=config
+        self.model=YoloStudentModel(model_path=config.model_path,manifest_path=config.model_manifest_path,verify_sha256=config.verify_model_sha256,device=config.device,imgsz=config.imgsz,min_confidence=config.min_detection_confidence,use_fp16=config.use_fp16,iou=config.iou,max_det=config.max_det,top_k=config.top_k)
+        self.manifest=ShotManifest(config.shot_manifest_path) if config.input_mode=='shot_manifest' else None
+    def intervals_for(self,video):
+        return self.manifest.intervals_for(video.path) if self.manifest else [ShotInterval('shot_000000',0,video.info.duration_ms)]
+    def analyze_file(self,source_media:str)->List[ShotAnalysis]:
+        video=VideoSource(source_media);return [self._analyze_interval(video,x) for x in self.intervals_for(video)]
+    def _analyze_interval(self,video,interval):
+        start,end=video.validate_interval(interval,self.config.max_shot_seconds);evidence=[]
+        for inds,frames in video.iter_sample_batches(start_frame=start,end_frame=end,inference_fps=self.config.inference_fps,batch_size=self.config.batch_size):
+            evidence.extend(self.model.infer_batch(frame_indices=inds,frames=frames,source_fps=video.info.fps))
+        if not evidence:raise ValueError(f'{interval.shot_id} produced no evidence')
+        runtime=ReviewedRound01Runtime(self.config.runtime_manifest_path,video.info.width,video.info.height)
+        xs=[];times=[];events=[];families=[];focus=[];votes=defaultdict(float)
+        for i,frame in enumerate(evidence):
+            candidates=[]
+            for c in frame.candidates:
+                cls=EXPECTED_FAMILIES.index(c.family);candidates.append({'class_id':cls,'family':c.family,'confidence':c.confidence,'bbox_xyxy_norm':list(c.bbox)})
+                votes[c.family]+=max(.001,c.confidence)**1.5
+            t=frame.frame_index*video.info.fps_den/video.info.fps_num
+            x,fam,event=runtime.update(candidates,t,shot_start=(i==0));xs.append(x);times.append(t);events.append(event);families.append(fam)
+            top=frame.candidates[0] if frame.candidates else None
+            focus.append(FocusSample(frame.frame_index,frame.timestamp_ms,top.family if top else 'safe_center',top.confidence if top else 0.0,top.bbox if top else None,top.x_center if top else None))
+        full=reconstruct_source_frames(times,xs,events,start,end,video.info.fps_num,video.info.fps_den)
+        family=max(votes,key=votes.get) if votes else 'safe_center';total=sum(votes.values());fconf=votes.get(family,0)/total if total else 1.0
+        crop_width=min(1.0,video.info.height*self.config.target_aspect_width_over_height/video.info.width)
+        return ShotAnalysis(video.path,_source_iq(video.path,self.config.source_iq),interval.shot_id,interval.start_ms,interval.end_ms,start,end-start,video.info.fps,video.info.fps_num,video.info.fps_den,video.info.fps_text,video.info.width,video.info.height,family,fconf,crop_width,tuple(float(x) for x in full),tuple(focus),self.model.identity)
