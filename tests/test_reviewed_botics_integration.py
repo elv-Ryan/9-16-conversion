@@ -297,6 +297,69 @@ class StreamContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'geometry/FPS'):
             s._consume_file(Video('5',width=1280,height=720),evidence())
 
+    def test_small_segment_fps_metadata_jitter_is_tolerated(self):
+        # Real ~59.94-fps chunks can expose slightly different container FPS
+        # metadata even though they belong to one continuous source stream.
+        first_fps = 59.94005994005994
+        next_fps = 59.93956043956044
+
+        s=service('segment_file',Detector())
+
+        self.feed(
+            s,
+            5,
+            fps=first_fps,
+        )
+
+        runtime = s._cycle_reviewed_runtime
+        self.assertIsNotNone(runtime)
+
+        s._consume_file(
+            Video(
+                '5',
+                fps=next_fps,
+            ),
+            evidence(
+                fps=next_fps,
+            ),
+        )
+
+        self.assertIs(
+            s._cycle_reviewed_runtime,
+            runtime,
+        )
+
+        self.assertAlmostEqual(
+            s._cycle_reviewed_fps,
+            first_fps,
+            places=12,
+        )
+
+    def test_material_segment_fps_change_is_rejected(self):
+        first_fps = 59.94005994005994
+
+        s=service('segment_file',Detector())
+
+        self.feed(
+            s,
+            5,
+            fps=first_fps,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            'geometry/FPS',
+        ):
+            s._consume_file(
+                Video(
+                    '5',
+                    fps=30.0,
+                ),
+                evidence(
+                    fps=30.0,
+                ),
+            )
+
 
 class Reconstruction(unittest.TestCase):
     def test_speaker_jump_is_not_interpolated(self):

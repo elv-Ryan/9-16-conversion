@@ -357,7 +357,12 @@ class ShotFocusService:
         self._cycle_smoothed: List[float] = []
         # One reviewed runtime per shot. A segment/batch boundary is not a reset.
         self._cycle_reviewed_runtime: Optional[ReviewedRound01Runtime] = None
-        self._cycle_reviewed_geometry: Optional[Tuple[int, int, float, float]] = None
+        self._cycle_reviewed_geometry: Optional[Tuple[int, int, float]] = None
+        # Container metadata can report tiny FPS differences between adjacent
+        # chunks of the same continuous stream. Freeze the reviewed controller
+        # clock to the FPS of the first segment in the shot rather than letting
+        # those metadata fluctuations alter controller time.
+        self._cycle_reviewed_fps: Optional[float] = None
         self._cycle_reviewed_last_frame: Optional[int] = None
         self._cycle_events: List[int] = []
         self._cycle_static_lock: Optional[float] = None
@@ -411,10 +416,36 @@ class ShotFocusService:
         _, legal_min, legal_max = legal_crop_geometry(
             info.width, info.height, self.config.target_aspect_width_over_height
         )
-        geometry = (info.width, info.height, info.fps, self.config.target_aspect_width_over_height)
-        if self._cycle_reviewed_geometry is not None and self._cycle_reviewed_geometry != geometry:
-            raise ValueError("Video geometry/FPS changed inside an open reviewed shot")
+        geometry = (
+            info.width,
+            info.height,
+            self.config.target_aspect_width_over_height,
+        )
+
+        if (
+            self._cycle_reviewed_geometry is not None
+            and self._cycle_reviewed_geometry != geometry
+        ):
+            raise ValueError(
+                "Video geometry/FPS changed inside an open reviewed shot"
+            )
+
         self._cycle_reviewed_geometry = geometry
+
+        if self._cycle_reviewed_fps is None:
+            self._cycle_reviewed_fps = float(info.fps)
+        elif not math.isclose(
+            float(info.fps),
+            self._cycle_reviewed_fps,
+            rel_tol=1e-4,
+            abs_tol=1e-3,
+        ):
+            # Reject a real rate switch while allowing the very small
+            # container/OpenCV metadata jitter seen between consecutive
+            # ~59.94-fps stream chunks.
+            raise ValueError(
+                "Video geometry/FPS changed inside an open reviewed shot"
+            )
 
         if self._cycle_reviewed_runtime is None:
             root = Path(__file__).resolve().parents[2]
@@ -449,7 +480,11 @@ class ShotFocusService:
                 if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
                     raise ValueError("Reviewed candidate box must be ordered and normalized")
 
-        fps_rate = Fraction(info.fps).limit_denominator(1_000_000)
+        assert self._cycle_reviewed_fps is not None
+        fps_rate = Fraction(
+            self._cycle_reviewed_fps
+        ).limit_denominator(1_000_000)
+
         values: List[float] = []
         for frame in evidence:
             candidates = [
