@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+from fractions import Fraction
+import math
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .config import RuntimeConfig, parse_hold_and_cut_families
-from .model import YoloStudentModel
+from .config import RuntimeConfig, parse_hold_and_cut_families, resolve_runtime_path
+from .model import EXPECTED_FAMILIES, YoloStudentModel
+from .reviewed_runtime import ReviewedRound01Runtime
 from .trajectory import (
     STATIC_FAMILIES,
     expand_to_source_frames,
@@ -91,7 +95,9 @@ class ShotFocusService:
             device=config.device,
             imgsz=config.imgsz,
             min_confidence=config.min_detection_confidence,
+            iou=config.iou,
             max_detections=config.max_detections,
+            top_k=config.top_k,
             use_fp16=config.use_fp16,
         )
 
@@ -303,6 +309,7 @@ class ShotFocusService:
             info=info,
             sample_frame_indices=[index + start_frame for index in self._cycle_indices],
             sample_x=self._cycle_smoothed,
+            sample_events=self._cycle_events,
             focus_samples=[
                 replace(
                     sample,
@@ -348,6 +355,11 @@ class ShotFocusService:
         self._cycle_confidences: List[float] = []
         self._cycle_focus: List[FocusSample] = []
         self._cycle_smoothed: List[float] = []
+        # One reviewed runtime per shot. A segment/batch boundary is not a reset.
+        self._cycle_reviewed_runtime: Optional[ReviewedRound01Runtime] = None
+        self._cycle_reviewed_geometry: Optional[Tuple[int, int, float, float]] = None
+        self._cycle_reviewed_last_frame: Optional[int] = None
+        self._cycle_events: List[int] = []
         self._cycle_static_lock: Optional[float] = None
         # Where the focus was last actually observed, and how many samples ago,
         # so association survives a batch boundary the way smoothing context
@@ -376,15 +388,9 @@ class ShotFocusService:
             frame for frame in self._cycle_pending if frame.frame_index >= limit
         ]
 
-        first_new = len(self._cycle_indices)
-        indices, raw_x, confidences, focus_samples = self._select_focus_series(
-            ready, self.current_family
-        )
-        self._cycle_indices.extend(indices)
-        self._cycle_raw_x.extend(raw_x)
-        self._cycle_confidences.extend(confidences)
-        self._cycle_focus.extend(focus_samples)
-        new_smoothed_samples = self._smooth_from(first_new)
+        # The locked family remains botics metadata. It must not filter the
+        # evidence sent to the reviewed per-observation controller.
+        new_smoothed_samples = self._reviewed_samples(ready)
         self._cycle_smoothed.extend(new_smoothed_samples)
 
         self.x_sink.publish(new_smoothed_samples)
@@ -392,8 +398,89 @@ class ShotFocusService:
         ## write out new_smoothed_samples here
         ## it will be some amount of data, equivalent to a segment in the steady state, but there may be more or less if the shot is just starting or ending. 
         
+    def _reviewed_samples(self, evidence: Sequence[FrameEvidence]) -> List[float]:
+        """Commit each new observation exactly once through the frozen v4 runtime.
+
+        Use the shot-relative source-frame clock, as v4 does, rather than rounded
+        metadata milliseconds. Botics' serialized timestamps/offsets are unchanged.
+        No new look-ahead buffer and no legacy smoother or target selector here.
+        """
+        info = self._last_video_info
+        if info is None or not math.isfinite(info.fps) or info.fps <= 0:
+            raise ValueError("Reviewed runtime requires valid video geometry/FPS")
+        _, legal_min, legal_max = legal_crop_geometry(
+            info.width, info.height, self.config.target_aspect_width_over_height
+        )
+        geometry = (info.width, info.height, info.fps, self.config.target_aspect_width_over_height)
+        if self._cycle_reviewed_geometry is not None and self._cycle_reviewed_geometry != geometry:
+            raise ValueError("Video geometry/FPS changed inside an open reviewed shot")
+        self._cycle_reviewed_geometry = geometry
+
+        if self._cycle_reviewed_runtime is None:
+            root = Path(__file__).resolve().parents[2]
+            manifest = resolve_runtime_path(self.config.runtime_manifest_path, root)
+            # Core uses geometry only for half-width. On normal 16:9 -> 9:16
+            # input this is the exact unmodified v4 construction. A narrow
+            # source with a custom target aspect needs a harmless bootstrap
+            # width, followed by botics' existing legal crop interval.
+            bootstrap_width = max(info.width, info.height * 9.0 / 16.0 + 1.0)
+            runtime = ReviewedRound01Runtime(str(manifest), bootstrap_width, info.height)
+            runtime.features.half = legal_min
+            runtime.features.ctrl.half = legal_min
+            self._cycle_reviewed_runtime = runtime
+
+        # Validate the batch before advancing any controller state.
+        last = self._cycle_reviewed_last_frame
+        for frame in evidence:
+            fi = frame.frame_index
+            if isinstance(fi, bool) or int(fi) != fi or fi < 0:
+                raise ValueError("Reviewed sample frame index must be a nonnegative integer")
+            if last is not None and fi <= last:
+                raise ValueError("Reviewed sample frames must strictly increase; do not replay context")
+            last = fi
+            for candidate in frame.candidates:
+                if candidate.family not in EXPECTED_FAMILIES:
+                    raise ValueError("Reviewed candidate violates seven-family contract")
+                if not math.isfinite(candidate.confidence) or not 0 <= candidate.confidence <= 1:
+                    raise ValueError("Reviewed candidate confidence must be finite and in [0,1]")
+                if len(candidate.bbox) != 4 or not all(math.isfinite(v) for v in candidate.bbox):
+                    raise ValueError("Reviewed candidate box must contain four finite values")
+                x1, y1, x2, y2 = candidate.bbox
+                if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+                    raise ValueError("Reviewed candidate box must be ordered and normalized")
+
+        fps_rate = Fraction(info.fps).limit_denominator(1_000_000)
+        values: List[float] = []
+        for frame in evidence:
+            candidates = [
+                {"class_id": EXPECTED_FAMILIES.index(c.family), "family": c.family,
+                 "confidence": float(c.confidence), "bbox_xyxy_norm": list(c.bbox)}
+                for c in frame.candidates
+            ]
+            x, _, event = self._cycle_reviewed_runtime.update(
+                candidates, frame.frame_index * fps_rate.denominator / fps_rate.numerator,
+                shot_start=self._cycle_reviewed_last_frame is None,
+            )
+            if not math.isfinite(x) or not legal_min - 1e-12 <= x <= legal_max + 1e-12:
+                raise ValueError("Reviewed runtime produced an invalid crop center")
+            top = max(frame.candidates, key=lambda c: c.confidence, default=None)
+            self._cycle_indices.append(int(frame.frame_index))
+            self._cycle_raw_x.append(top.x_center if top is not None else None)
+            self._cycle_confidences.append(top.confidence if top is not None else 0.0)
+            self._cycle_focus.append(FocusSample(
+                frame_index=frame.frame_index, timestamp_ms=frame.timestamp_ms,
+                family=top.family if top is not None else "safe_center",
+                confidence=top.confidence if top is not None else 0.0,
+                bbox=top.bbox if top is not None else None,
+                raw_x_center_norm=top.x_center if top is not None else None,
+            ))
+            self._cycle_events.append(int(event))
+            self._cycle_reviewed_last_frame = int(frame.frame_index)
+            values.append(float(x))
+        return values
+
     def _smooth_from(self, first_new: int) -> List[float]:
-        """Smoothed X for samples ``first_new`` onwards, once and for all."""
+        """Legacy botics helper, retained for reference; not called by active steering."""
         info = self._last_video_info
         _, legal_min, legal_max = legal_crop_geometry(
             info.width, info.height, self.config.target_aspect_width_over_height
@@ -553,6 +640,7 @@ class ShotFocusService:
         sample_frame_indices: Sequence[int],
         sample_x: Sequence[float],
         focus_samples: Sequence[FocusSample],
+        sample_events: Optional[Sequence[int]] = None,
     ) -> ShotAnalysis:
         crop_width, legal_min, legal_max = legal_crop_geometry(
             info.width, info.height, self.config.target_aspect_width_over_height
@@ -564,6 +652,7 @@ class ShotFocusService:
             end_frame=end_frame,
             legal_min=legal_min,
             legal_max=legal_max,
+            sample_events=sample_events,
         )
         return ShotAnalysis(
             source_media=source_media,

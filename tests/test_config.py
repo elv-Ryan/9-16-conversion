@@ -51,11 +51,14 @@ class RuntimeConfigTests(unittest.TestCase):
             config_from_params({"input_mode": "not_a_real_mode"})
 
     def test_detection_gate_has_both_a_floor_and_a_cap(self):
-        # The checkpoint's head is NMS-free and returns its top-k whatever the
-        # scores are, so a floor without a cap still admits the whole tail.
+        # Reviewed Round01 contract: preserve weak detector evidence first,
+        # then retain only the strongest downstream candidates.
         config = config_from_params({})
-        self.assertEqual(config.min_detection_confidence, 0.05)
-        self.assertEqual(config.max_detections, 20)
+        self.assertEqual(config.min_detection_confidence, 0.001)
+        self.assertEqual(config.iou, 0.7)
+        self.assertEqual(config.max_detections, 100)
+        self.assertEqual(config.top_k, 20)
+        self.assertFalse(config.use_fp16)
 
     def test_max_detections_is_bounded_by_the_checkpoint_head(self):
         with self.assertRaisesRegex(ValueError, "max_detections"):

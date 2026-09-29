@@ -36,6 +36,8 @@ class YoloStudentModel:
         min_confidence: float,
         max_detections: int,
         use_fp16: bool,
+        iou: float = 0.7,
+        top_k: int = 20,
     ) -> None:
         self.model_path = Path(model_path)
         self.manifest_path = Path(manifest_path)
@@ -43,7 +45,9 @@ class YoloStudentModel:
         self.device = str(device)
         self.imgsz = int(imgsz)
         self.min_confidence = float(min_confidence)
+        self.iou = float(iou)
         self.max_detections = int(max_detections)
+        self.top_k = int(top_k)
         self.use_fp16 = bool(use_fp16)
         self._model = None
         self._manifest = self._load_manifest()
@@ -128,6 +132,7 @@ class YoloStudentModel:
             source=list(frames),
             imgsz=self.imgsz,
             conf=self.min_confidence,
+            iou=self.iou,
             # The end-to-end head hands back its top-k regardless of quality,
             # and its own default k is 300. Without both of these the whole
             # tail arrives and every downstream consumer has to carry it.
@@ -196,6 +201,7 @@ class YoloStudentModel:
                         )
                     )
             candidates.sort(key=lambda item: item.confidence, reverse=True)
+            candidates = candidates[: self.top_k]
             evidence.append(
                 FrameEvidence(
                     frame_index=int(frame_index),

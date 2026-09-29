@@ -1,93 +1,205 @@
 #!/bin/bash
+set -euo pipefail
 
-## colors
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Run against the checkout containing this script's caller.
+# The harness is invoked while cwd is either the old or new repo.
+export PYTHONPATH="${PYTHONPATH:-src}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 RESET='\033[0m'
-
-echo -e "${CYAN}${BOLD}"
-echo "  ╔═══════════════════════════════════╗"
-echo "  ║          TEST TIME BABY.          ║"
-echo "  ╚═══════════════════════════════════╝"
-echo -e "${RESET}"
 
 step() { echo -e "${MAGENTA}  ──▶${RESET} ${BOLD}$*${RESET}"; }
 ok()   { echo -e "${GREEN}  ✔  $*${RESET}"; }
 fail() { echo -e "${RED}  ✘  $*${RESET}"; }
 
-step "Cleaning up previous run..."
-rm -rf out.jsonl
+MODE="${1:-default}"
 
-echo ""
-step "Launching it or something ${YELLOW}${IMAGE_NAME}${RESET}..."
-echo ""
+/bin/rm -f out.jsonl test-local.wall_seconds
 
-# Build newline-separated list of test files as container-side paths
-INPUT=$(find test-files/ -maxdepth 1 -type f | sort | head -10)
-
-params='{"input_mode": "segment_file"}'
-if [ "$1" = "preshot" ]; then
-    INPUT=$(find test-files/nba -maxdepth 1 -type f | sort | tail -n +100 | head -10)
-    params='{"family_determination_max_seconds": 99999}'
-elif [ "$1" = "preshotsegs" ]; then
-    INPUT=$(find test-files/nba -maxdepth 1 -type f | sort | tail -n +100 | head -10)
-    params='{"input_mode":"segment_file","family_determination_max_seconds": 99999}'
+if [[ -n "${TEST_INPUT_FILE:-}" ]]; then
+    INPUT="$TEST_INPUT_FILE"
+elif [[ -n "${TEST_INPUT_DIR:-}" ]]; then
+    INPUT="$(
+        /usr/bin/find "$TEST_INPUT_DIR" \
+          -maxdepth 1 \
+          -type f \
+          | /usr/bin/sort
+    )"
+else
+    INPUT="$(
+        /usr/bin/find test-files/ \
+          -maxdepth 1 \
+          -type f \
+          | /usr/bin/sort \
+          | /usr/bin/head -10
+    )"
 fi
 
+params='{"input_mode":"segment_file"}'
 
-FILE_COUNT=$(echo "$INPUT" | grep -c .)
-step "Found ${YELLOW}${FILE_COUNT}${RESET} file(s) to process:"
-echo "$INPUT" | sed "s/^/       ${CYAN}▸${RESET} /"
+case "$MODE" in
+    shot)
+        params='{"input_mode":"shot_file"}'
+        ;;
 
-##--volume=$(pwd)/models:/elv/models:ro
-echo "$INPUT" | python run.py --output-path out.jsonl --params "$params"
+    preshot)
+        if [[ -z "${TEST_INPUT_FILE:-}" && -z "${TEST_INPUT_DIR:-}" ]]; then
+            INPUT="$(
+                /usr/bin/find test-files/nba \
+                  -maxdepth 1 \
+                  -type f \
+                  | /usr/bin/sort \
+                  | /usr/bin/tail -n +100 \
+                  | /usr/bin/head -10
+            )"
+        fi
 
+        params='{"input_mode":"shot_file","family_determination_max_seconds":99999}'
+        ;;
 
-ex=$?
-echo ""
-if [ $ex -ne 0 ]; then
-    fail "Container exited with error code ${ex}"
-    echo -e "${RED}${BOLD}"
-    echo "  ╔═══════════════════════════════════╗"
-    echo "  ║            TEST FAILED            ║"
-    echo "  ╚═══════════════════════════════════╝"
-    echo -e "${RESET}"
-    exit $ex
-fi
+    preshotsegs)
+        if [[ -z "${TEST_INPUT_FILE:-}" && -z "${TEST_INPUT_DIR:-}" ]]; then
+            INPUT="$(
+                /usr/bin/find test-files/nba \
+                  -maxdepth 1 \
+                  -type f \
+                  | /usr/bin/sort \
+                  | /usr/bin/tail -n +100 \
+                  | /usr/bin/head -10
+            )"
+        fi
 
-step "Checking output..."
-if [ ! -f out.jsonl ]; then
-    fail "test-output/out.jsonl is missing"
-    echo -e "${RED}${BOLD}"
-    echo "  ╔═══════════════════════════════════╗"
-    echo "  ║            TEST FAILED            ║"
-    echo "  ╚═══════════════════════════════════╝"
-    echo -e "${RESET}"
+        params='{"input_mode":"segment_file","family_determination_max_seconds":99999}'
+        ;;
+
+    default)
+        ;;
+
+    *)
+        fail "Unknown mode: $MODE"
+        exit 2
+        ;;
+esac
+
+FILE_COUNT="$(
+    printf '%s\n' "$INPUT" |
+    /usr/bin/grep -c . || true
+)"
+
+if [[ "$FILE_COUNT" -lt 1 ]]; then
+    fail "No input files"
     exit 1
 fi
 
-RESULT_COUNT=$(jq -s '[.[] | select(.type == "progress" or .type == "error")] | length' out.jsonl)
-if [ "$RESULT_COUNT" -ne "$FILE_COUNT" ]; then
-    fail "Expected ${YELLOW}${FILE_COUNT}${RED} progress/error rows but found ${YELLOW}${RESULT_COUNT}${RED} in out.jsonl"
-    echo -e "${RED}${BOLD}"
-    echo "  ╔═══════════════════════════════════╗"
-    echo "  ║            TEST FAILED            ║"
-    echo "  ╚═══════════════════════════════════╝"
-    echo -e "${RESET}"
+step "Mode: $MODE"
+step "Python: $PYTHON_BIN"
+step "Found $FILE_COUNT input file(s):"
+
+printf '%s\n' "$INPUT" |
+    /usr/bin/sed 's/^/       ▸ /'
+
+START_NS="$(/usr/bin/date +%s%N)"
+
+printf '%s\n' "$INPUT" |
+"$PYTHON_BIN" run.py \
+    --output-path out.jsonl \
+    --params "$params"
+
+RC=$?
+
+END_NS="$(/usr/bin/date +%s%N)"
+
+if [[ "$RC" -ne 0 ]]; then
+    fail "run.py exited with code $RC"
+    exit "$RC"
+fi
+
+if [[ ! -s out.jsonl ]]; then
+    fail "out.jsonl missing or empty"
     exit 1
 fi
-ok "out.jsonl: ${YELLOW}${RESULT_COUNT}/${FILE_COUNT}${RESET} file(s) accounted for (progress or error)"
 
-echo ""
-echo -e "${GREEN}${BOLD}"
-echo "  ╔═══════════════════════════════════╗"
-echo "  ║           TEST PASSED  🎉         ║"
-echo "  ╚═══════════════════════════════════╝"
-echo -e "${RESET}"
+JQ_BIN="$(command -v jq)"
 
-cd test-output
-find
+if [[ -z "$JQ_BIN" ]]; then
+    fail "jq is not installed/on PATH"
+    exit 1
+fi
+
+RESULT_COUNT="$(
+"$JQ_BIN" -s \
+  '[.[] | select(.type == "progress" or .type == "error")] | length' \
+  out.jsonl
+)"
+
+ERROR_COUNT="$(
+"$JQ_BIN" -s \
+  '[.[] | select(.type == "error")] | length' \
+  out.jsonl
+)"
+
+PROGRESS_COUNT="$(
+"$JQ_BIN" -s \
+  '[.[] | select(.type == "progress")] | length' \
+  out.jsonl
+)"
+
+VERTICAL_COUNT="$(
+"$JQ_BIN" -s \
+  '[.[]
+    | select(
+        .type == "tag"
+        and .data.track == "vertical_video"
+      )
+   ] | length' \
+  out.jsonl
+)"
+
+if [[ "$RESULT_COUNT" -ne "$FILE_COUNT" ]]; then
+    fail "Expected $FILE_COUNT terminal rows, found $RESULT_COUNT"
+    exit 1
+fi
+
+if [[ "$ERROR_COUNT" -ne 0 ]]; then
+    fail "Found $ERROR_COUNT model/error row(s)"
+    "$JQ_BIN" -c 'select(.type == "error")' out.jsonl
+    exit 1
+fi
+
+if [[ "$PROGRESS_COUNT" -ne "$FILE_COUNT" ]]; then
+    fail "Expected $FILE_COUNT progress rows, found $PROGRESS_COUNT"
+    exit 1
+fi
+
+if [[ "$MODE" == "shot" || "$MODE" == "preshot" ]]; then
+    if [[ "$VERTICAL_COUNT" -ne "$FILE_COUNT" ]]; then
+        fail "Expected $FILE_COUNT vertical_video tags, found $VERTICAL_COUNT"
+        exit 1
+    fi
+fi
+
+ELAPSED_SEC="$(
+"$PYTHON_BIN" - "$START_NS" "$END_NS" <<'PY'
+import sys
+
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+
+print(f"{(end-start)/1e9:.6f}")
+PY
+)"
+
+ok "progress=$PROGRESS_COUNT errors=$ERROR_COUNT vertical=$VERTICAL_COUNT"
+ok "wall_seconds=$ELAPSED_SEC"
+
+printf '%s\n' "$ELAPSED_SEC" > test-local.wall_seconds
+
+echo "TEST_LOCAL_STRICT_PASS"

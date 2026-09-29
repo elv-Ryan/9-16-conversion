@@ -19,6 +19,7 @@ EXPECTED_FAMILIES = (
 
 DEFAULT_MODEL_PATH = "models/nba_yolo_student/best.pt"
 DEFAULT_MODEL_MANIFEST_PATH = "models/nba_yolo_student/model_manifest.json"
+DEFAULT_RUNTIME_MANIFEST_PATH = "models/nba_yolo_student/runtime_manifest.json"
 DEFAULT_SHOT_MODEL_PATH = "models/shot/transnetv2/torch_transnetv2.pth"
 
 # A shot_file input is already one whole shot, so its family is voted on the
@@ -49,30 +50,23 @@ class RuntimeConfig:
     model_path: str = DEFAULT_MODEL_PATH
     shot_model_path: str = DEFAULT_SHOT_MODEL_PATH
     model_manifest_path: str = DEFAULT_MODEL_MANIFEST_PATH
+    runtime_manifest_path: str = DEFAULT_RUNTIME_MANIFEST_PATH
     verify_model_sha256: bool = True
     device: str = "0"
     imgsz: int = 1280
     inference_fps: float = 10.0
     batch_size: int = 8
-    # The checkpoint's head is end-to-end (NMS-free) and returns its top
-    # ``max_detections`` boxes regardless of quality, so this floor is the only
-    # thing standing between the family vote and a hundred noise boxes per
-    # frame. Both are passed straight through to predict().
+    # Reviewed Round01 evidence contract. The detector is intentionally run
+    # with a very low confidence floor and a larger detector cap, then only the
+    # strongest retained candidates are exposed to downstream framing logic.
     #
-    # 0.05 is measured, not guessed: over 3,150 sampled frames of test-files
-    # this checkpoint returns 96 boxes per frame at the old 0.001 floor, whose
-    # x-centres are spread over 0.73 of the frame -- they agree on nothing. At
-    # 0.05 that falls to 2.3 boxes per frame spread over 0.011, 78% of frames
-    # still carry a box, and the family vote changes on 1 file in 150. Raising
-    # it further starts costing real evidence: 0.15 leaves only 43% of frames
-    # with any box and flips 19% of the votes. The checkpoint's confidences are
-    # compressed (p50 = 0.002, p99 = 0.10), so this is a low number by design.
-    min_detection_confidence: float = 0.05
-    # Applied as top-k by score before the confidence filter, so it can only
-    # ever discard boxes the floor would have dropped anyway: at 0.05 no frame
-    # in the sample kept more than 15 boxes.
-    max_detections: int = 20
-    use_fp16: bool = True
+    # Keep the existing botics parameter name ``max_detections`` for backwards
+    # compatibility. It corresponds to v4's detector ``max_det`` setting.
+    min_detection_confidence: float = 0.001
+    iou: float = 0.7
+    max_detections: int = 100
+    top_k: int = 20
+    use_fp16: bool = False
     live_data_stream: str = ""
 
     input_mode: str = "segment_file"
@@ -178,10 +172,12 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
         "coordinate_decimals",
         "trajectory_commit_lag_frames",
         "max_detections",
+        "top_k",
     }
     number_fields = {
         "inference_fps",
         "min_detection_confidence",
+        "iou",
         "max_shot_seconds",
         "min_shot_seconds",
         "min_hold_seconds",
@@ -208,6 +204,8 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
 
 
 def _validate(config: RuntimeConfig) -> None:
+    if not config.runtime_manifest_path.strip():
+        raise ValueError("runtime_manifest_path must be non-empty")
     if config.imgsz < 320 or config.imgsz > 4096:
         raise ValueError("imgsz must be between 320 and 4096")
     if config.batch_size < 1 or config.batch_size > 128:
@@ -216,10 +214,14 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("inference_fps must be in (0, 120]")
     if not (0.0 <= config.min_detection_confidence < 1.0):
         raise ValueError("min_detection_confidence must be in [0, 1)")
+    if not (0.0 < config.iou <= 1.0):
+        raise ValueError("iou must be in (0, 1]")
     if config.max_detections < 1 or config.max_detections > 300:
         # 300 is the checkpoint's own Detect.max_det; asking for more is a
         # silent no-op rather than an error, so reject it here.
         raise ValueError("max_detections must be between 1 and 300")
+    if config.top_k < 1 or config.top_k > config.max_detections:
+        raise ValueError("top_k must be between 1 and max_detections")
     if not (0.1 <= config.max_shot_seconds <= 7200.0):
         raise ValueError("max_shot_seconds must be between 0.1 and 7200")
     if not (0.0 <= config.min_shot_seconds <= 10.0):

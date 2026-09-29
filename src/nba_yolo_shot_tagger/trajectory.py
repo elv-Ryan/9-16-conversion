@@ -282,7 +282,22 @@ def expand_to_source_frames(
     end_frame: int,
     legal_min: float,
     legal_max: float,
+    sample_events: Optional[Sequence[int]] = None,
 ) -> np.ndarray:
+    """Botics frame geometry, with optional v4 speaker-jump boundaries.
+
+    Legacy callers without events retain their exact interpolation behavior.
+    Event 2 holds the left sample until the jump frame, then uses the new X.
+    """
+    if sample_events is not None:
+        if len(sample_events) != len(sample_frame_indices) or len(sample_events) != len(sample_x):
+            raise ValueError("sample_events, sample_frame_indices and sample_x must align")
+        indices = np.asarray(sample_frame_indices, dtype=float)
+        values = np.asarray(sample_x, dtype=float)
+        if not np.isfinite(indices).all() or not np.isfinite(values).all():
+            raise ValueError("Reviewed reconstruction requires finite samples")
+        if len(indices) > 1 and np.any(np.diff(indices) <= 0):
+            raise ValueError("Reviewed sample frame indices must strictly increase")
     frame_count = max(0, end_frame - start_frame)
     if frame_count == 0:
         return np.empty((0,), dtype=np.float64)
@@ -294,4 +309,13 @@ def expand_to_source_frames(
     y_axis = np.asarray(sample_x, dtype=np.float64)
     target = np.arange(start_frame, end_frame, dtype=np.float64)
     expanded = np.interp(target, x_axis, y_axis)
+    if sample_events is not None and len(x_axis) > 1:
+        hi = np.searchsorted(x_axis, target, side="right")
+        interior = (hi > 0) & (hi < len(x_axis))
+        positions = np.flatnonzero(interior)
+        if len(positions):
+            right = hi[positions]
+            jumps = np.asarray(sample_events, dtype=int)[right] == 2
+            use = positions[jumps]
+            expanded[use] = y_axis[hi[use] - 1]
     return np.clip(expanded, legal_min, legal_max)

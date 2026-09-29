@@ -9,6 +9,8 @@ from nba_yolo_shot_tagger.trajectory import (
     smooth_samples,
 )
 from nba_yolo_shot_tagger.types import Candidate, FrameEvidence, ModelIdentity, VideoInfo
+from nba_yolo_shot_tagger.model import EXPECTED_FAMILIES
+from nba_yolo_shot_tagger.reviewed_runtime import ReviewedRound01Runtime, reconstruct_source_frames
 
 
 FPS = 59.94
@@ -102,32 +104,21 @@ class ShotFileModeTests(unittest.TestCase):
         self.assertEqual(service.finalize(), [])
 
     def test_output_still_matches_whole_shot_smoothing(self):
-        # shot_file cuts at every file end, so a shot is never committed in
-        # pieces and must come out exactly as a single whole-shot pass.
+        # The contract is now the frozen reviewed runtime, not the superseded
+        # bidirectional botics smoother. Keep the test ID to track the change.
         service = _service("shot_file")
         evidence = _evidence()
         shot = service._consume_file(_FakeVideo("a.mp4"), evidence)[0]
-
-        indices, raw_x, confidences, _ = service._select_focus_series(evidence, shot.family)
-        _, legal_min, legal_max = legal_crop_geometry(
-            1920, 1080, service.config.target_aspect_width_over_height
-        )
-        sample_x = smooth_samples(
-            family=shot.family,
-            raw_x=raw_x,
-            confidences=confidences,
-            inference_fps=service.config.inference_fps,
-            legal_min=legal_min,
-            legal_max=legal_max,
-        )
-        expected = expand_to_source_frames(
-            sample_frame_indices=indices,
-            sample_x=sample_x,
-            start_frame=0,
-            end_frame=FRAME_COUNT,
-            legal_min=legal_min,
-            legal_max=legal_max,
-        )
+        runtime = ReviewedRound01Runtime(service.config.runtime_manifest_path, 1920, 1080)
+        xs, times, events = [], [], []
+        for i, frame in enumerate(evidence):
+            cs = [{"class_id": EXPECTED_FAMILIES.index(c.family), "family": c.family,
+                   "confidence": c.confidence, "bbox_xyxy_norm": list(c.bbox)}
+                  for c in frame.candidates]
+            t = frame.frame_index / FPS
+            x, _, event = runtime.update(cs, t, shot_start=i == 0)
+            xs.append(x); times.append(t); events.append(event)
+        expected = reconstruct_source_frames(times, xs, events, 0, FRAME_COUNT, 5994, 100)
         self.assertEqual(len(shot.x_coordinates), len(expected))
         for produced, reference in zip(shot.x_coordinates, expected):
             self.assertAlmostEqual(produced, float(reference), places=12)
@@ -272,15 +263,30 @@ class SegmentFileModeTests(unittest.TestCase):
             self.assertAlmostEqual(shot.x_coordinates[cycle_index], value, places=9)
 
     def test_static_family_holds_one_crop_across_segments(self):
-        service = _service(
-            "segment_file", _FakeDetector({}), family_determination_max_seconds=3.0
-        )
-        for path in ("f0.mp4", "f1.mp4", "f2.mp4", "f3.mp4"):
-            service._consume_file(_FakeVideo(path), _evidence(family="static_composition"))
+        # Reviewed static-family settling is causal and need not be constant.
+        # What must survive the joins is one continuous, reference-matching state.
+        service = _service("segment_file", _FakeDetector({}),
+                           family_determination_max_seconds=3.0)
+        frames = []
+        for i, path in enumerate(("f0.mp4", "f1.mp4", "f2.mp4", "f3.mp4")):
+            evidence = _evidence(family="static_composition")
+            frames.extend((i * FRAME_COUNT + f.frame_index, f.candidates) for f in evidence)
+            service._consume_file(_FakeVideo(path), evidence)
         shot = service.finalize()[0]
         self.assertEqual(shot.family, "static_composition")
-        # Committed in several batches, but still a single locked crop.
-        self.assertEqual(len(set(shot.x_coordinates)), 1)
+        runtime = ReviewedRound01Runtime(service.config.runtime_manifest_path, 1920, 1080)
+        xs, times, events = [], [], []
+        for i, (fi, candidates) in enumerate(frames):
+            cs = [{"class_id": EXPECTED_FAMILIES.index(c.family), "family": c.family,
+                   "confidence": c.confidence, "bbox_xyxy_norm": list(c.bbox)}
+                  for c in candidates]
+            t = fi / FPS
+            x, _, event = runtime.update(cs, t, shot_start=i == 0)
+            times.append(t); xs.append(x); events.append(event)
+        expected = reconstruct_source_frames(times, xs, events, 0, 4 * FRAME_COUNT, 5994, 100)
+        self.assertEqual(len(shot.x_coordinates), len(expected))
+        for produced, reference in zip(shot.x_coordinates, expected):
+            self.assertAlmostEqual(produced, float(reference), places=12)
 
     def test_shot_ids_increment_across_shots(self):
         detector = _FakeDetector({"f0.mp4": [40, 80]})
