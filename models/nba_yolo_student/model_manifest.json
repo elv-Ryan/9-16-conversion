@@ -1,16 +1,12 @@
 {
   "schema_version": "eluvio.nba-yolo-model-artifact.v1",
-  "artifact_version": "round00_fp32_6gpu_v7",
-  "source_checkpoint": "/home/mltrain/elv-ryan/projects/9-16-conversion-ryan-v2.1-student-mvp/output/generic_basketball_v11_student_round00_v1/yolo_fp32_6gpu_round00_v7/long_run/focus_target_round00_fp32/weights/best.pt",
-  "sha256": "e1f498b0447f77c30d2b82210367b556d5f649caeee370f5fd3d20f7a0fec770",
-  "bytes": 20381637,
-  "class_names": [
-    "active_speaker",
-    "gameplay_follow",
-    "graphic_text_lock",
-    "person_subject",
-    "safe_center",
-    "split_screen",
-    "static_composition"
-  ]
+  "artifact_version": "round01_schemafix_v3_reviewed_oneeuro",
+  "source_checkpoint": "/home/mltrain/elv-ryan/projects/9-16-conversion-ryan-v2.1-student-mvp/output/generic_basketball_v11_student_round00_v1/round01_round02_autopilot_v1/runs/round01_schemafix_v3/weights/best.pt",
+  "sha256": "0921e4843864557bc1e5141f655a461af24c758d7390f2ea0553091df743865a",
+  "bytes": 20380165,
+  "precision": "FP32",
+  "imgsz": 1280,
+  "review_evidence_hz": 10,
+  "one_euro": {"min_cutoff": 0.4, "beta": 1.0},
+  "class_names": ["active_speaker","gameplay_follow","graphic_text_lock","person_subject","safe_center","split_screen","static_composition"]
 }
