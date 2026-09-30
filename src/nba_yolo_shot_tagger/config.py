@@ -47,12 +47,19 @@ class RuntimeConfig:
     continuous stream and detects shot boundaries itself.
     """
 
+    ### these almost certainly should not be exposed as runtime config parameters to the tagger
     model_path: str = DEFAULT_MODEL_PATH
     shot_model_path: str = DEFAULT_SHOT_MODEL_PATH
     model_manifest_path: str = DEFAULT_MODEL_MANIFEST_PATH
     runtime_manifest_path: str = DEFAULT_RUNTIME_MANIFEST_PATH
     verify_model_sha256: bool = True
+
+    ## this should probably be removed entirely -- tagger assigns gpu to container so
+    ## it is "always" device 0  (and for local just use CUDA_VISIBLE_DEVICES)
     device: str = "0"
+
+
+    ## these are reasonable to configure at runtime
     imgsz: int = 1280
     inference_fps: float = 10.0
     batch_size: int = 8
@@ -92,14 +99,9 @@ class RuntimeConfig:
     trajectory_commit_lag_frames: int = 300
 
     # Families whose trajectory holds one framing and cuts, instead of being
-    # continuously smoothed. Comma-separated so it can be retargeted through
-    # --params without a rebuild: interviews are meant to land on
-    # ``active_speaker``, but if this checkpoint votes them ``person_subject``
-    # the same treatment is one deploy-time edit away.
+    # continuously smoothed. Comma-separated so it can be retargeted through --params without a rebuild
+    # How long a subject must hold the framing before a change of subject is acccepted
     hold_and_cut_families: str = "active_speaker"
-    # How long a subject must hold the framing before a change of subject is
-    # accepted as a cut. Shorter reads as restless; longer misses real
-    # exchanges. Interview cutting rarely goes faster than about a second.
     min_hold_seconds: float = 1.0
 
     output_track: str = "vertical_video"
@@ -109,6 +111,7 @@ class RuntimeConfig:
     coordinate_decimals: int = 6
     target_aspect_width_over_height: float = 9.0 / 16.0
 
+    ## probably will always be false
     emit_progress_ratio: bool = False
 
     def __post_init__(self) -> None:
