@@ -134,8 +134,10 @@ class RuntimeParity(unittest.TestCase):
                           (candidate(family,.35 if i<120 else .74),)) for i in range(0,240,6)]
         s=service();shot=s._consume_file(v,ev)[0]
         xs,events,expected=oracle(ev,v.info)
-        np.testing.assert_allclose(s.x_sink.values,xs,rtol=0,atol=1e-12)
         np.testing.assert_allclose(shot.x_coordinates,expected,rtol=0,atol=1e-12)
+        # The live sink carries the same data as the tag, per source frame --
+        # not the ~10 Hz sample series the trajectory is built from.
+        self.assertEqual(list(s.x_sink.values),as_published(shot.x_coordinates))
     def test_gameplay(self):self.check_family('gameplay_follow')
     def test_speaker(self):self.check_family('active_speaker')
     def test_person(self):self.check_family('person_subject')
@@ -146,12 +148,16 @@ class RuntimeParity(unittest.TestCase):
     def test_reference_formula_is_controller_then_one_euro_not_anchor(self):
         cfg=json.loads(Path(MANIFEST).read_text());c=Controller(cfg['controller_params'],.158203125);f=OneEuro(.4,1.)
         ev=evidence(n=120,x=.72);s=service();shot=s._consume_file(Video(),ev)[0]
-        expected=[]
+        expected=[];times=[];events=[]
         for e in ev:
             t=e.frame_index/60.;base,event=c.step(t,.72,.8,'gameplay_follow')
             if event==2:f.reset()
-            expected.append(f.step(t,float(np.float32(base))))
-        np.testing.assert_allclose(s.x_sink.values,expected,atol=1e-12,rtol=0)
+            times.append(t);events.append(event);expected.append(f.step(t,float(np.float32(base))))
+        # Formula still checked at sample cadence, then expanded to frames --
+        # which is what both the tag and the live sink now carry.
+        frames=reconstruct_source_frames(times,expected,events,0,120,60,1)
+        np.testing.assert_allclose(shot.x_coordinates,frames,atol=1e-12,rtol=0)
+        self.assertEqual(list(s.x_sink.values),as_published(shot.x_coordinates))
     def test_metadata_family_does_not_gate_steering(self):
         ev=evidence(n=240)
         ev=[replace(f,candidates=(candidate('active_speaker',.25,.99), candidate('gameplay_follow',.75,.4)))
@@ -208,6 +214,12 @@ class RuntimeParity(unittest.TestCase):
         np.testing.assert_allclose(a.x_coordinates,expected,atol=1e-12,rtol=0)
 
 
+def as_published(xs,decimals=6):
+    """The tag's series as the sink publishes it -- rounded the same way the
+    contract rounds it for JSON, so the two agree exactly."""
+    return [round(float(x),decimals) for x in xs]
+
+
 def restitch(tags,n=120):
     """Per-file tags back into one X series over the absolute stream.
 
@@ -249,7 +261,8 @@ class StreamContracts(unittest.TestCase):
     def test_all_committed_sample_frames_once(self):
         s=service('segment_file',Detector());self.feed(s,6)
         seen=list(s._cycle_indices);s.finalize()
-        self.assertEqual(len(s.x_sink.values),120);self.assertEqual(len(seen),len(set(seen)))
+        # One value per source frame across the six files, each written once.
+        self.assertEqual(len(s.x_sink.values),720);self.assertEqual(len(seen),len(set(seen)))
     def test_commit_lag_not_changed(self):
         s=service('segment_file',Detector());self.feed(s,5)
         self.assertEqual(s._commit_lag,300);self.assertTrue(s._cycle_indices)
@@ -312,13 +325,18 @@ class StreamContracts(unittest.TestCase):
         s=service('segment_file',Detector());self.feed(s,1)
         self.assertEqual(len(s.finalize()),1);n=len(s.x_sink.values)
         self.assertEqual(s.finalize(),[]);self.assertEqual(len(s.x_sink.values),n)
-    def test_live_sink_sample_cadence_not_frame_cadence(self):
+    def test_live_sink_carries_the_same_series_as_the_tag(self):
+        # This used to assert the opposite -- the sink got the ~10 Hz sample
+        # series while the tag got one value per source frame, so a live
+        # consumer that assumed per-frame ran the crop about six times slow.
         s=service();a=s._consume_file(Video(),evidence())[0]
-        self.assertEqual(len(a.x_coordinates),120);self.assertEqual(len(s.x_sink.values),20)
+        self.assertEqual(len(a.x_coordinates),120)
+        self.assertEqual(len(s.x_sink.values),120)
+        self.assertEqual(list(s.x_sink.values),as_published(a.x_coordinates))
     def test_live_fixed_point_encoding_preserved(self):
         self.assertEqual(encode_x(.613),struct.pack('<I',6130))
         s=service();s._consume_file(Video(),evidence())
-        blob=b''.join(encode_x(v) for v in s.x_sink.values);self.assertEqual(len(blob),80)
+        blob=b''.join(encode_x(v) for v in s.x_sink.values);self.assertEqual(len(blob),480)
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/'out.bin';FileSink(str(p)).publish(s.x_sink.values)
             self.assertEqual(p.read_bytes(),blob)

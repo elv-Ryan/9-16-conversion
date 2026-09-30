@@ -323,11 +323,25 @@ class ShotFocusService:
             high = min(abs_end, folded.abs_end)
             if high <= low:
                 continue
-            emitted.append(
-                self._build_file_tag(
-                    folded, low, high, is_final=closes_shot and high >= abs_end
-                )
+            analysis = self._build_file_tag(
+                folded, low, high, is_final=closes_shot and high >= abs_end
             )
+            # Same data as the tag, at the same moment. Tags tile the stream in
+            # order, so the sink receives one contiguous crop centre per source
+            # frame -- which is what a live consumer has to be able to assume.
+            #
+            # Rounded the way the tag is rounded, with the same operation, so
+            # the two agree exactly rather than to within a fixed-point step.
+            # Nothing at 1e-4 of frame width is visible in a crop; the point is
+            # that a consumer reading the live stream and a consumer reading
+            # the tags never have to reconcile two different numbers.
+            self.x_sink.publish(
+                [
+                    round(float(value), self.config.coordinate_decimals)
+                    for value in analysis.x_coordinates
+                ]
+            )
+            emitted.append(analysis)
         self._emitted_abs = max(self._emitted_abs, abs_end)
         # A file nothing can refer to any more. Shots only move forward, so
         # anything wholly behind the frontier is done with.
@@ -537,11 +551,9 @@ class ShotFocusService:
         # evidence sent to the reviewed per-observation controller.
         new_smoothed_samples = self._reviewed_samples(ready)
         self._cycle_smoothed.extend(new_smoothed_samples)
-
-        self.x_sink.publish(new_smoothed_samples)
-
-        ## write out new_smoothed_samples here
-        ## it will be some amount of data, equivalent to a segment in the steady state, but there may be more or less if the shot is just starting or ending. 
+        # The live sink is fed at emission, not here: it must carry the same
+        # per-source-frame series the tags carry, and this is the ~10 Hz
+        # sample series the trajectory is built from.
         
     def _reviewed_samples(self, evidence: Sequence[FrameEvidence]) -> List[float]:
         """Commit each new observation exactly once through the frozen v4 runtime.

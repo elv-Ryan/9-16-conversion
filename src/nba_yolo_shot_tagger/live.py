@@ -1,3 +1,4 @@
+import math
 import struct
 from typing import Protocol
 from loguru import logger
@@ -9,10 +10,19 @@ class VerticalSink(Protocol):
         ...
 
 def encode_x(value: float) -> bytes:
-    """Encode a float in [0.0, 1.0] as a 4-byte little-endian fixed-point value."""
-    if not 0.0 <= value <= 1.0:
-        raise ValueError(f"value must be in [0.0, 1.0], got {value}")
-    return struct.pack("<I", int(value * 10_000 + 0.5))
+    """Encode a float in [0.0, 1.0] as a 4-byte little-endian fixed-point value.
+
+    Out-of-range clamps rather than raising. This runs inside the per-file
+    commit, so raising here does not lose one sample -- it aborts the whole
+    segment and turns it into an Error message. A crop centre a hair outside
+    the legal interval is worth clamping silently; losing the segment is not.
+    Anything non-finite falls back to centre, the same answer the trajectory
+    itself gives when it has nothing to go on.
+    """
+    if not math.isfinite(value):
+        value = 0.5
+    clamped = min(1.0, max(0.0, float(value)))
+    return struct.pack("<I", int(clamped * 10_000 + 0.5))
 
 class NoopSink(VerticalSink):
     def publish(self, x_vals: list[float]) -> None:

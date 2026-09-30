@@ -476,3 +476,71 @@ class FileFramedTagTests(unittest.TestCase):
         # Every committed sample value must appear in the framed output.
         self.assertTrue(set(round(v, 9) for v in reference) <= set(round(v, 9) for v in framed))
 
+
+class LiveSinkTests(unittest.TestCase):
+    """The sink and the tags must be the same data, in the same order."""
+
+    class _Recorder:
+        def __init__(self): self.values = []
+        def publish(self, x_vals): self.values.extend(x_vals)
+
+    def _run(self, mode, files, cuts=None, **overrides):
+        service = _service(
+            mode, detector=_FakeDetector(cuts or {}) if mode == "segment_file" else None,
+            **overrides,
+        )
+        sink = self._Recorder()
+        service.x_sink = sink
+        tags = _feed(service, *files)
+        tags.extend(service.finalize())
+        # What a consumer of out.jsonl actually reads, rounding included.
+        from nba_yolo_shot_tagger.contract import tags_for_analysis
+        serialized = [
+            x
+            for analysis in tags
+            for x in tags_for_analysis(analysis, service.config)[0].additional_info[
+                "x-coordinates"
+            ]
+        ]
+        return tags, sink.values, serialized
+
+    def test_the_sink_gets_one_value_per_source_frame(self):
+        files = [f"{i}.mp4" for i in range(4)]
+        tags, published, serialized = self._run(
+            "segment_file", files,
+            family_determination_max_seconds=0.1,
+            trajectory_commit_lag_frames=25,
+            min_shot_seconds=0.0,
+        )
+        self.assertEqual(len(published), len(files) * FRAME_COUNT)
+        # Exactly what the tags carry on the wire, not merely close to it.
+        self.assertEqual(published, serialized)
+
+    def test_shot_file_mode_too(self):
+        tags, published, serialized = self._run("shot_file", ["0.mp4", "1.mp4"])
+        self.assertEqual(len(published), 2 * FRAME_COUNT)
+        self.assertEqual(published, serialized)
+
+    def test_a_cut_does_not_duplicate_or_drop_a_frame(self):
+        files = [f"{i}.mp4" for i in range(4)]
+        tags, published, serialized = self._run(
+            "segment_file", files, cuts={"2.mp4": [40]},
+            family_determination_max_seconds=0.1,
+            trajectory_commit_lag_frames=25,
+            min_shot_seconds=0.0,
+        )
+        self.assertEqual(len(published), len(files) * FRAME_COUNT)
+        self.assertEqual(published, serialized)
+
+
+class EncodeXTests(unittest.TestCase):
+    def test_it_clamps_instead_of_losing_the_segment(self):
+        # encode_x runs inside the per-file commit, so raising would abort the
+        # whole segment rather than drop one sample.
+        from nba_yolo_shot_tagger.live import encode_x
+        self.assertEqual(encode_x(0.613), encode_x(0.613))
+        self.assertEqual(encode_x(-0.001), encode_x(0.0))
+        self.assertEqual(encode_x(1.001), encode_x(1.0))
+        self.assertEqual(encode_x(float("nan")), encode_x(0.5))
+        self.assertEqual(encode_x(float("inf")), encode_x(0.5))
+

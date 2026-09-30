@@ -85,7 +85,8 @@ def main() -> None:
     else:
         sink = NoopSink()
 
-    sink = FileSink("hardcode_file_sink_test")
+    if os.getenv("HARDCODE_FILE_SINK", None) is not None:
+        sink = FileSink(os.getenv("HARDCODE_FILE_SINK"))
     
     service = ShotFocusService(config, sink)
 
