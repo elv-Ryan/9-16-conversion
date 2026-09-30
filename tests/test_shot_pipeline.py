@@ -83,14 +83,7 @@ def _service(input_mode: str, detector=None, **overrides) -> ShotFocusService:
     service.x_sink = NoopSink()
     service.shot_detector = detector
     service._apply_config()
-    service._shot_index = 0
-    service._abs_frames = 0
-    service._abs_ms = 0
-    service._last_source_media = None
-    service._last_video_info = None
-    service._last_abs_start = 0
-    service._last_abs_start_ms = 0
-    service._reset_cycle(0, 0)
+    service._reset_stream()
     return service
 
 
@@ -145,19 +138,28 @@ class ShotFileModeTests(unittest.TestCase):
 
 
 class SegmentFileModeTests(unittest.TestCase):
-    def test_shot_spanning_files_closes_with_negative_offsets(self):
+    def test_a_shot_spanning_files_is_emitted_one_tag_per_file(self):
+        # This used to be one tag anchored to whichever file was in hand, with
+        # a large negative offset. Framing is on the input files now, so the
+        # same shot arrives as four tags, each addressed to its own file.
         detector = _FakeDetector({"f3.mp4": [60]})
         service = _service("segment_file", detector, **MECHANISM)
         completed = _feed(service, "f0.mp4", "f1.mp4", "f2.mp4", "f3.mp4")
 
-        self.assertEqual(len(completed), 1)
-        shot = completed[0]
-        self.assertEqual(shot.source_media, "f3.mp4")
-        self.assertEqual(shot.start_frame, -FRAME_COUNT * 3)
-        self.assertLess(shot.start_ms, 0)
-        self.assertEqual(shot.start_frame + shot.frame_count, 60)
-        self.assertEqual(shot.focus_samples[-1].frame_index, 54)
-        self.assertEqual(shot.focus_samples[0].frame_index, -FRAME_COUNT * 3)
+        self.assertEqual(
+            [shot.source_media for shot in completed],
+            ["f0.mp4", "f1.mp4", "f2.mp4", "f3.mp4"],
+        )
+        self.assertEqual(len({shot.shot_id for shot in completed}), 1)
+        for shot in completed:
+            self.assertEqual(shot.start_frame, 0)
+            self.assertEqual(shot.start_ms, 0)
+        self.assertEqual(
+            [shot.frame_count for shot in completed],
+            [FRAME_COUNT, FRAME_COUNT, FRAME_COUNT, 60],
+        )
+        self.assertEqual(completed[0].focus_samples[0].frame_index, 0)
+        self.assertEqual(completed[-1].focus_samples[-1].frame_index, 54)
 
     def test_leftover_after_a_cut_starts_the_next_shot(self):
         detector = _FakeDetector({"f0.mp4": [60]})
@@ -192,17 +194,19 @@ class SegmentFileModeTests(unittest.TestCase):
         service = _service("segment_file", detector, **MECHANISM)
         completed = _feed(service, "f0.mp4", "f1.mp4")
 
+        # The shot ran from f0's frame 0 to 10 frames before f1 began, so it
+        # is f0 that gets the tag -- reported while f1 was being processed.
         self.assertEqual(len(completed), 1)
         shot = completed[0]
-        self.assertEqual(shot.source_media, "f1.mp4")
-        # The shot ran from f0's frame 0 to 10 frames before f1 began.
-        self.assertEqual(shot.start_frame, -FRAME_COUNT)
-        self.assertEqual(shot.end_ms, round(1000.0 * -10 / FPS))
+        self.assertEqual(shot.source_media, "f0.mp4")
+        self.assertEqual(shot.start_frame, 0)
         self.assertEqual(shot.frame_count, FRAME_COUNT - 10)
-        # The 10 deferred frames opened the next shot, which f1 continues.
+        # The 10 deferred frames opened the next shot, which f1 continues; that
+        # shot owes a tag to each of the two files it touches.
         remaining = service.finalize()
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0].frame_count, 10 + FRAME_COUNT)
+        self.assertEqual([r.source_media for r in remaining], ["f0.mp4", "f1.mp4"])
+        self.assertEqual([r.start_frame for r in remaining], [FRAME_COUNT - 10, 0])
+        self.assertEqual(sum(r.frame_count for r in remaining), 10 + FRAME_COUNT)
 
     def test_flush_emits_a_cut_the_detector_was_holding(self):
         detector = _FakeDetector({}, pending=[60])
@@ -245,12 +249,14 @@ class SegmentFileModeTests(unittest.TestCase):
 
     def test_trajectory_is_committed_as_segments_arrive(self):
         service = _service("segment_file", _FakeDetector({}), **MECHANISM)
-        _feed(service, "f0.mp4", "f1.mp4")
-        # Still inside the vote threshold plus the commit lag, so undecided.
+        _feed(service, "f0.mp4")
+        # One file is 2.0s of a 3.0s vote window, so still undecided. The gate
+        # is measured on evidence folded, not on the commit horizon, so the
+        # commit lag does not push this out any further.
         self.assertIsNone(service.current_family)
         self.assertEqual(service._cycle_smoothed, [])
 
-        _feed(service, "f2.mp4")
+        _feed(service, "f1.mp4", "f2.mp4")
         # The family is now settled and the backlog has been caught up,
         # without waiting for the shot to end.
         self.assertEqual(service.current_family, "gameplay_follow")
@@ -264,15 +270,23 @@ class SegmentFileModeTests(unittest.TestCase):
     def test_committed_trajectory_survives_a_late_cut(self):
         detector = _FakeDetector({"f3.mp4": [-10]})
         service = _service("segment_file", detector, **MECHANISM)
-        _feed(service, "f0.mp4", "f1.mp4", "f2.mp4")
+        # Files now get their tags as soon as they are complete, so collect
+        # every emission, not just the batch the cut lands in.
+        emitted = _feed(service, "f0.mp4", "f1.mp4", "f2.mp4")
         committed = list(zip(service._cycle_indices, service._cycle_smoothed))
         self.assertGreater(len(committed), 0)
 
-        shot = _feed(service, "f3.mp4")[0]
+        emitted += _feed(service, "f3.mp4")
         # np.interp passes exactly through its sample points, so each committed
-        # sample must still be readable, unchanged, in the emitted trajectory.
+        # sample must still be readable, unchanged, in the emitted trajectory --
+        # now reassembled from the per-file tags it was split across.
+        stream = {}
+        for shot in emitted:
+            base = int(shot.source_media[1]) * FRAME_COUNT + shot.start_frame
+            for offset, value in enumerate(shot.x_coordinates):
+                stream[base + offset] = value
         for cycle_index, value in committed:
-            self.assertAlmostEqual(shot.x_coordinates[cycle_index], value, places=9)
+            self.assertAlmostEqual(stream[cycle_index], value, places=9)
 
     def test_static_family_holds_one_crop_across_segments(self):
         # Reviewed static-family settling is causal and need not be constant.
@@ -280,12 +294,16 @@ class SegmentFileModeTests(unittest.TestCase):
         service = _service("segment_file", _FakeDetector({}),
                            **MECHANISM)
         frames = []
+        emitted = []
         for i, path in enumerate(("f0.mp4", "f1.mp4", "f2.mp4", "f3.mp4")):
             evidence = _evidence(family="static_composition")
             frames.extend((i * FRAME_COUNT + f.frame_index, f.candidates) for f in evidence)
-            service._consume_file(_FakeVideo(path), evidence)
-        shot = service.finalize()[0]
+            emitted.extend(service._consume_file(_FakeVideo(path), evidence))
+        emitted.extend(service.finalize())
+        shot = emitted[0]
         self.assertEqual(shot.family, "static_composition")
+        # Reassemble the shot from its per-file tags before comparing.
+        produced_x = [x for tag in emitted for x in tag.x_coordinates]
         runtime = ReviewedRound01Runtime(service.config.runtime_manifest_path, 1920, 1080)
         xs, times, events = [], [], []
         for i, (fi, candidates) in enumerate(frames):
@@ -296,8 +314,8 @@ class SegmentFileModeTests(unittest.TestCase):
             x, _, event = runtime.update(cs, t, shot_start=i == 0)
             times.append(t); xs.append(x); events.append(event)
         expected = reconstruct_source_frames(times, xs, events, 0, 4 * FRAME_COUNT, 5994, 100)
-        self.assertEqual(len(shot.x_coordinates), len(expected))
-        for produced, reference in zip(shot.x_coordinates, expected):
+        self.assertEqual(len(produced_x), len(expected))
+        for produced, reference in zip(produced_x, expected):
             self.assertAlmostEqual(produced, float(reference), places=12)
 
     def test_shot_ids_increment_across_shots(self):
@@ -316,16 +334,18 @@ class MinimumShotLengthTests(unittest.TestCase):
         detector = _FakeDetector({"a.mp4": [], "b.mp4": [10, 12, 16]})
         service = _service("segment_file", detector=detector)
         completed = _feed(service, "a.mp4", "b.mp4")
-        self.assertEqual(len(completed), 1)
-        shot = completed[0]
         # One shot ending at the first cut, not three ending 2 and 4 frames on.
-        self.assertEqual(shot.start_frame, -FRAME_COUNT)
-        self.assertEqual(shot.frame_count, FRAME_COUNT + 10)
+        # It covers both files, so it is written as one tag per file.
+        self.assertEqual(len({shot.shot_id for shot in completed}), 1)
+        self.assertEqual([c.source_media for c in completed], ["a.mp4", "b.mp4"])
+        self.assertEqual(sum(c.frame_count for c in completed), FRAME_COUNT + 10)
         # The absorbed frames are not lost: they open the next shot, which the
         # final flush closes.
         remaining = service.finalize()
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0].frame_count, 2 * FRAME_COUNT - (FRAME_COUNT + 10))
+        self.assertEqual(
+            sum(r.frame_count for r in remaining),
+            2 * FRAME_COUNT - (FRAME_COUNT + 10),
+        )
 
     def test_shot_file_boundaries_are_honoured_however_short(self):
         # The caller declared these boundaries; the guard is only a defence
@@ -347,105 +367,112 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class IncrementalTagEmissionTests(unittest.TestCase):
-    """max_tag_latency_seconds: tags before a shot ends, not only at its end."""
+class FileFramedTagTests(unittest.TestCase):
+    """Tags are framed on the input files, not on the shots."""
 
     EARLY = dict(
-        trajectory_commit_lag_frames=25,
         family_determination_max_seconds=0.1,
+        trajectory_commit_lag_frames=25,
         min_shot_seconds=0.0,
     )
 
-    def _run(self, files, latency):
+    def _run(self, files, cuts=None):
         service = _service(
-            "segment_file",
-            detector=_FakeDetector({}),
-            max_tag_latency_seconds=latency,
-            **self.EARLY,
+            "segment_file", detector=_FakeDetector(cuts or {}), **self.EARLY
         )
         completed = _feed(service, *files)
         completed.extend(service.finalize())
         return completed
 
     @staticmethod
-    def _tiles(shots):
-        """Absolute [start, end) of each shot part, anchored per emitting file."""
-        spans = []
-        for index, shot in enumerate(shots):
-            base = int(shot.source_media.split(".")[0]) * FRAME_COUNT
-            start = base + shot.start_frame
-            spans.append((start, start + shot.frame_count))
-        return spans
+    def _abs(shot):
+        """Absolute [start, end) of a tag, from its own file's position."""
+        base = int(shot.source_media.split(".")[0]) * FRAME_COUNT
+        return base + shot.start_frame, base + shot.start_frame + shot.frame_count
 
-    def test_off_by_default_so_nothing_changes(self):
-        self.assertEqual(RuntimeConfig().max_tag_latency_seconds, 0.0)
-        whole = self._run([f"{i}.mp4" for i in range(6)], 0.0)
-        self.assertEqual(len(whole), 1)
-        self.assertTrue(whole[0].is_final)
-        self.assertEqual(whole[0].part_index, 0)
-
-    def test_a_long_shot_is_emitted_in_parts(self):
+    def test_one_tag_per_input_file_for_a_shot_that_spans_files(self):
         files = [f"{i}.mp4" for i in range(6)]
-        parts = self._run(files, 1.0)
-        self.assertGreater(len(parts), 1)
-        self.assertEqual([p.shot_id for p in parts], [parts[0].shot_id] * len(parts))
-        self.assertEqual([p.part_index for p in parts], list(range(len(parts))))
-        self.assertEqual([p.is_final for p in parts], [False] * (len(parts) - 1) + [True])
+        tags = self._run(files)
+        # One shot, six segments -> six tags, one addressed to each segment.
+        self.assertEqual(len(tags), len(files))
+        self.assertEqual([t.source_media for t in tags], files)
+        self.assertEqual(len({t.shot_id for t in tags}), 1)
+        for tag in tags:
+            self.assertEqual(tag.frame_count, FRAME_COUNT)
 
-    def test_the_parts_tile_the_shot_exactly(self):
-        files = [f"{i}.mp4" for i in range(6)]
-        whole = self._run(files, 0.0)
-        parts = self._run(files, 1.0)
-        self.assertEqual(
-            sum(p.frame_count for p in parts), sum(w.frame_count for w in whole)
-        )
-        spans = self._tiles(parts)
+    def test_offsets_are_relative_to_the_tags_own_file(self):
+        # The old framing anchored a late tag to whatever file was being
+        # processed, which made its offsets negative. A tag now describes its
+        # own file, so they start at zero.
+        for tag in self._run([f"{i}.mp4" for i in range(6)]):
+            self.assertEqual(tag.start_frame, 0)
+            self.assertEqual(tag.start_ms, 0)
+            self.assertGreaterEqual(tag.start_frame, 0)
+
+    def test_a_cut_inside_a_file_gives_that_file_two_tags(self):
+        tags = self._run(["0.mp4", "1.mp4"], cuts={"1.mp4": [40]})
+        by_file = {}
+        for tag in tags:
+            by_file.setdefault(tag.source_media, []).append(tag)
+        self.assertEqual(len(by_file["1.mp4"]), 2)
+        first, second = by_file["1.mp4"]
+        self.assertNotEqual(first.shot_id, second.shot_id)
+        self.assertEqual((first.start_frame, first.frame_count), (0, 40))
+        self.assertEqual((second.start_frame, second.frame_count), (40, FRAME_COUNT - 40))
+
+    def test_shot_file_mode_is_one_tag_per_file(self):
+        service = _service("shot_file")
+        tags = _feed(service, "0.mp4", "1.mp4", "2.mp4")
+        self.assertEqual([t.source_media for t in tags], ["0.mp4", "1.mp4", "2.mp4"])
+        for tag in tags:
+            self.assertEqual((tag.start_frame, tag.frame_count), (0, FRAME_COUNT))
+            self.assertTrue(tag.is_final)
+
+    def test_the_tags_tile_the_stream_exactly(self):
+        tags = self._run([f"{i}.mp4" for i in range(6)], cuts={"3.mp4": [40]})
+        spans = sorted(self._abs(t) for t in tags)
+        self.assertEqual(spans[0][0], 0)
         for (_, end), (start, _) in zip(spans, spans[1:]):
             self.assertEqual(end, start)  # no gap, no overlap
-        self.assertEqual(spans[0][0], self._tiles(whole)[0][0])
-        self.assertEqual(spans[-1][1], self._tiles(whole)[-1][1])
+        self.assertEqual(spans[-1][1], 6 * FRAME_COUNT)
 
-    def test_the_values_are_identical_to_the_whole_shot(self):
-        # Splitting a shot must change only when X is published, never what it
-        # is. Anything else would make an early tag a guess.
-        files = [f"{i}.mp4" for i in range(6)]
-        whole = [x for w in self._run(files, 0.0) for x in w.x_coordinates]
-        parts = [x for p in self._run(files, 1.0) for x in p.x_coordinates]
-        self.assertEqual(len(parts), len(whole))
-        for early, complete in zip(parts, whole):
-            self.assertAlmostEqual(early, complete, places=12)
-
-    def test_nothing_is_emitted_before_the_family_is_decided(self):
-        # A tag has to carry a family, so the vote is a floor on latency no
-        # setting here can undercut.
+    def test_a_delayed_tag_still_names_its_own_segment(self):
+        # Nothing is final for several files, so the first round of tags is
+        # written long after those segments arrived -- still addressed to them.
         service = _service(
             "segment_file",
             detector=_FakeDetector({}),
-            max_tag_latency_seconds=0.01,
-            trajectory_commit_lag_frames=25,
-            family_determination_max_seconds=600.0,
+            family_determination_max_seconds=3.0,
+            trajectory_commit_lag_frames=120,
             min_shot_seconds=0.0,
         )
-        self.assertEqual(_feed(service, *[f"{i}.mp4" for i in range(6)]), [])
-        self.assertEqual(service.shot_state, "determining_family")
+        self.assertEqual(_feed(service, "0.mp4", "1.mp4"), [])
+        later = _feed(service, "2.mp4", "3.mp4")
+        self.assertTrue(later)
+        self.assertEqual(later[0].source_media, "0.mp4")
+        self.assertEqual(later[0].start_frame, 0)
 
-    def test_a_shot_shorter_than_the_latency_is_not_split(self):
-        parts = self._run(["0.mp4", "1.mp4"], 600.0)
-        self.assertEqual(len(parts), 1)
-        self.assertTrue(parts[0].is_final)
+    def test_only_the_last_tag_of_a_shot_is_final(self):
+        tags = self._run([f"{i}.mp4" for i in range(4)])
+        self.assertEqual([t.is_final for t in tags], [False, False, False, True])
+        self.assertEqual([t.part_index for t in tags], [0, 1, 2, 3])
 
-    def test_a_partial_never_runs_past_the_last_committed_sample(self):
-        # Frames after the last sample interpolate toward one that has not
-        # arrived, so their values are not yet final and must not ship.
-        service = _service(
-            "segment_file",
-            detector=_FakeDetector({}),
-            max_tag_latency_seconds=0.5,
-            **self.EARLY,
-        )
+    def test_no_frame_is_emitted_before_its_value_is_final(self):
+        service = _service("segment_file", detector=_FakeDetector({}), **self.EARLY)
         _feed(service, "0.mp4", "1.mp4", "2.mp4")
-        self.assertLessEqual(
-            service._cycle_emitted_frames,
-            service._cycle_indices[-1] + 1,
-        )
+        last_committed = service._cycle_start_abs + service._cycle_indices[-1] + 1
+        self.assertLessEqual(service._emitted_abs, last_committed)
+
+    def test_values_match_what_a_whole_shot_pass_would_produce(self):
+        # File framing changes which tag a frame is written into, never its X.
+        files = [f"{i}.mp4" for i in range(5)]
+        framed = [x for t in self._run(files) for x in t.x_coordinates]
+        service = _service("segment_file", detector=_FakeDetector({}), **self.EARLY)
+        for path in files:
+            service._consume_file(_FakeVideo(path), _evidence())
+        service._advance(service._abs_frames - service._cycle_start_abs, force_family=True)
+        reference = list(service._cycle_smoothed)
+        self.assertEqual(len(framed), 5 * FRAME_COUNT)
+        # Every committed sample value must appear in the framed output.
+        self.assertTrue(set(round(v, 9) for v in reference) <= set(round(v, 9) for v in framed))
 

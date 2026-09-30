@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from fractions import Fraction
 import math
 from pathlib import Path
@@ -19,6 +19,25 @@ from .trajectory import (
 from .types import Candidate, FocusSample, FrameEvidence, ShotAnalysis, VideoInfo
 from .video import VideoSource
 from .live import VerticalSink
+
+
+@dataclass(frozen=True)
+class _FoldedFile:
+    """One input file's place on the absolute stream axis.
+
+    Tags are framed on these, not on shots, so a file has to stay addressable
+    until everything inside it has been written out -- which can be several
+    files after it arrived.
+    """
+
+    path: str
+    info: VideoInfo
+    abs_start: int
+    abs_start_ms: int
+
+    @property
+    def abs_end(self) -> int:
+        return self.abs_start + self.info.frame_count
 
 
 CATEGORY_BY_FAMILY = {
@@ -115,9 +134,23 @@ class ShotFocusService:
             self.shot_detector = None
         self._apply_config()
 
+        self._reset_stream()
+
+    def _reset_stream(self) -> None:
+        """All state that tracks the stream itself, in one place.
+
+        Companion to _apply_config: __init__ also loads a checkpoint, so tests
+        build the service through __new__ and call these two instead. Adding a
+        field here must not mean remembering to add it there as well.
+        """
         self._shot_index = 0
         self._abs_frames = 0  # source frames folded so far, across all files
         self._abs_ms = 0
+        # Absolute frame through which tags have been written. Shots tile the
+        # stream, so one frontier covers all of it and emission stays monotonic.
+        self._emitted_abs = 0
+        # Files still owed a tag, or part of one.
+        self._files: List[_FoldedFile] = []
         self._last_source_media: Optional[str] = None
         self._last_video_info: Optional[VideoInfo] = None
         self._last_abs_start = 0
@@ -168,12 +201,8 @@ class ShotFocusService:
         completed: List[ShotAnalysis] = []
         if self.shot_detector is not None:
             for relative_cut in self.shot_detector.flush():
-                analysis = self._close(self._last_abs_start + relative_cut)
-                if analysis is not None:
-                    completed.append(analysis)
-        analysis = self._close(self._abs_frames, force=True)
-        if analysis is not None:
-            completed.append(analysis)
+                completed.extend(self._close(self._last_abs_start + relative_cut))
+        completed.extend(self._close(self._abs_frames, force=True))
         return completed
 
     # ------------------------------------------------------------------
@@ -226,25 +255,20 @@ class ShotFocusService:
         # this round can report, so none of it has to be revisited.
         completed: List[ShotAnalysis] = []
         for cut in cuts:
-            analysis = self._close(cut)
-            if analysis is not None:
-                completed.append(analysis)
+            completed.extend(self._close(cut))
 
         # Then catch up / keep up on the shot that is still open.
         self._advance(self._abs_frames - self._commit_lag - self._cycle_start_abs)
 
-        # ...and write out what that settled, if the caller asked for tags
-        # before the shot ends.
-        partial = self._flush_partial()
-        if partial is not None:
-            completed.append(partial)
+        # ...and write out whatever that settled, framed on the input files it
+        # came from. A file whose frames are not final yet simply gets its tag
+        # on a later round.
+        completed.extend(self._flush_ready())
 
         if (self._abs_ms - self._cycle_start_abs_ms) / 1000.0 >= self.config.max_shot_seconds:
             # Safety valve: an open shot is held in memory, and a stream can
             # run a long way without a detected cut.
-            analysis = self._close(self._abs_frames, force=True)
-            if analysis is not None:
-                completed.append(analysis)
+            completed.extend(self._close(self._abs_frames, force=True))
         return completed
 
     def _fold(
@@ -255,6 +279,14 @@ class ShotFocusService:
         abs_start_ms: int,
     ) -> None:
         """Add a file's evidence to the open shot, on that shot's own axis."""
+        self._files.append(
+            _FoldedFile(
+                path=self._last_source_media,
+                info=info,
+                abs_start=abs_start,
+                abs_start_ms=abs_start_ms,
+            )
+        )
         frame_base = abs_start - self._cycle_start_abs
         ms_base = abs_start_ms - self._cycle_start_abs_ms
         self._cycle_pending.extend(
@@ -268,34 +300,60 @@ class ShotFocusService:
         self._abs_frames = abs_start + info.frame_count
         self._abs_ms = abs_start_ms + info.duration_ms
 
-    def _emit_span(self, span_end: int, *, is_final: bool) -> Optional[ShotAnalysis]:
-        """Emit committed trajectory for [already emitted, ``span_end``).
+    def _emit_through(self, abs_end: int, *, closes_shot: bool) -> List[ShotAnalysis]:
+        """Write out committed trajectory up to ``abs_end``, one tag per file.
 
-        ``span_end`` is on the open shot's own frame axis. Everything is
-        anchored to the file currently being processed, exactly as a whole-shot
-        emission is, so a span that began before that file simply carries a
-        more negative offset.
+        Tags are framed on the input files rather than on the shot. A shot that
+        spans four segments therefore produces four tags sharing its shot_id,
+        and a segment a cut lands in produces one tag per shot piece inside it.
+
+        Each tag is anchored to the file whose frames it describes, so its
+        offsets are its own and start at zero -- however many files later it is
+        actually written. That is the point: a segment's framing arrives late,
+        but it arrives addressed to that segment.
         """
-        span_start = self._cycle_emitted_frames
-        if span_end <= span_start or self.current_family is None:
-            return None
-        info = self._last_video_info
-        anchor_abs = self._last_abs_start
-        anchor_abs_ms = self._last_abs_start_ms
+        if self.current_family is None:
+            return []
+        start = max(self._emitted_abs, self._cycle_start_abs)
+        if abs_end <= start:
+            return []
+        emitted: List[ShotAnalysis] = []
+        for folded in self._files:
+            low = max(start, folded.abs_start)
+            high = min(abs_end, folded.abs_end)
+            if high <= low:
+                continue
+            emitted.append(
+                self._build_file_tag(
+                    folded, low, high, is_final=closes_shot and high >= abs_end
+                )
+            )
+        self._emitted_abs = max(self._emitted_abs, abs_end)
+        # A file nothing can refer to any more. Shots only move forward, so
+        # anything wholly behind the frontier is done with.
+        self._files = [
+            folded for folded in self._files if folded.abs_end > self._emitted_abs
+        ]
+        return emitted
 
-        shot_start_frame = self._cycle_start_abs - anchor_abs
-        shot_start_ms = self._cycle_start_abs_ms - anchor_abs_ms
-        start_frame = shot_start_frame + span_start
-        end_frame = shot_start_frame + span_end
-        start_ms = shot_start_ms + _frame_to_ms(span_start, info.fps)
-        # A sub-millisecond span must still be a non-empty interval.
+    def _build_file_tag(
+        self, folded: _FoldedFile, low: int, high: int, *, is_final: bool
+    ) -> ShotAnalysis:
+        """One tag: the part of ``folded`` between absolute frames low..high."""
+        info = folded.info
+        start_frame = low - folded.abs_start
+        end_frame = high - folded.abs_start
+        start_ms = _frame_to_ms(start_frame, info.fps)
+        # A sub-millisecond piece must still be a non-empty interval.
         end_ms = max(_frame_to_ms(end_frame, info.fps), start_ms + 1)
-
-        # The whole committed sample series is handed over, not just this
-        # span's slice: interpolation at the left edge needs the sample before
-        # the span, and expand_to_source_frames takes only the frames asked for.
+        # The open shot's samples live on the shot axis; shift them onto this
+        # file's. The whole committed series is handed over, not just this
+        # file's slice, because interpolating the first frame needs the sample
+        # before it -- expand_to_source_frames takes only the frames asked for.
+        frame_shift = self._cycle_start_abs - folded.abs_start
+        ms_shift = self._cycle_start_abs_ms - folded.abs_start_ms
         analysis = self._build_shot_analysis(
-            source_media=self._last_source_media,
+            source_media=folded.path,
             shot_id=f"shot_{self._shot_index:06d}",
             start_ms=start_ms,
             end_ms=end_ms,
@@ -303,50 +361,53 @@ class ShotFocusService:
             end_frame=end_frame,
             info=info,
             sample_frame_indices=[
-                index + shot_start_frame for index in self._cycle_indices
+                index + frame_shift for index in self._cycle_indices
             ],
             sample_x=self._cycle_smoothed,
             sample_events=self._cycle_events,
             focus_samples=[
                 replace(
                     sample,
-                    frame_index=sample.frame_index + shot_start_frame,
-                    timestamp_ms=sample.timestamp_ms + shot_start_ms,
+                    frame_index=sample.frame_index + frame_shift,
+                    timestamp_ms=sample.timestamp_ms + ms_shift,
                 )
                 for sample in self._cycle_focus
-                if span_start <= sample.frame_index < span_end
+                if low <= sample.frame_index + self._cycle_start_abs < high
             ],
             part_index=self._cycle_parts,
             is_final=is_final,
         )
-        self._cycle_emitted_frames = span_end
         self._cycle_parts += 1
         return analysis
 
-    def _flush_partial(self) -> Optional[ShotAnalysis]:
-        """Write out the open shot's committed prefix, if it has grown enough.
+    def _flush_ready(self) -> List[ShotAnalysis]:
+        """Write out every input file the open shot has finished with.
 
-        Stops at the last committed sample rather than at the commit horizon:
-        the frames after it interpolate toward a sample that has not arrived,
-        so their values are not yet final and must not be published.
+        Two limits, and the tighter one wins. Trajectory is only final through
+        the last committed sample: past it, frames interpolate toward a sample
+        that has not arrived, so their values could still move. And a file is
+        only written whole, so the frontier is then rounded back to a file
+        boundary -- a segment should get one tag, not one per round of commits
+        that happened to reach into it. A cut is the only thing that splits a
+        segment's framing, and that goes through _close.
         """
-        if self.config.max_tag_latency_seconds <= 0.0:
-            return None
         if self.current_family is None or not self._cycle_indices:
-            return None
-        info = self._last_video_info
-        span_end = self._cycle_indices[-1] + 1
-        pending_ms = _frame_to_ms(span_end - self._cycle_emitted_frames, info.fps)
-        if pending_ms < 1000.0 * self.config.max_tag_latency_seconds:
-            return None
-        return self._emit_span(span_end, is_final=False)
+            return []
+        final_through = self._cycle_start_abs + self._cycle_indices[-1] + 1
+        complete = [
+            folded.abs_end
+            for folded in self._files
+            if folded.abs_end <= final_through and folded.abs_end > self._emitted_abs
+        ]
+        if not complete:
+            return []
+        return self._emit_through(max(complete), closes_shot=False)
 
-    def _close(self, cut_abs: int, *, force: bool = False) -> Optional[ShotAnalysis]:
+    def _close(self, cut_abs: int, *, force: bool = False) -> List[ShotAnalysis]:
         """Cut the open shot at an absolute stream frame and emit it.
 
-        The shot is emitted against the file currently being processed, so a
-        cut that lands before that file starts (one the detector deferred)
-        simply produces a more negative offset.
+        Emission is framed on the input files, so this returns one tag per
+        file the shot still owes, not one tag for the shot.
 
         A cut that would carve off less than ``min_shot_seconds`` is dropped
         instead: a two-frame shot is a flickering transition, not a shot, and
@@ -358,29 +419,21 @@ class ShotFocusService:
         """
         length = cut_abs - self._cycle_start_abs
         if length <= 0:
-            return None
+            return []
         info = self._last_video_info
         if (
             not force
             and _frame_to_ms(length, info.fps) < 1000.0 * self._min_shot_seconds
         ):
-            return None
-        anchor_abs = self._last_abs_start
-        anchor_abs_ms = self._last_abs_start_ms
+            return []
 
         # Settle the rest of this shot: a family if it was cut before the vote
         # was due, and the trajectory for whatever was still being held back.
         self._advance(length, force_family=True)
 
-        # Whatever of this shot has not already been written out. With
-        # max_tag_latency_seconds off that is the entire shot, which is the
-        # historical single-tag emission.
-        analysis = self._emit_span(length, is_final=True)
+        # Whatever of this shot has not been written out yet, file by file.
+        emitted = self._emit_through(cut_abs, closes_shot=True)
         self._shot_index += 1
-
-        end_frame = cut_abs - anchor_abs
-        start_ms = self._cycle_start_abs_ms - anchor_abs_ms
-        end_ms = max(_frame_to_ms(end_frame, info.fps), start_ms + 1)
 
         # Whatever came after the cut opens the next shot. It was never
         # committed, so it carries over as raw evidence and is re-decided.
@@ -393,8 +446,10 @@ class ShotFocusService:
             )
             for frame in self._cycle_pending
         ]
-        self._reset_cycle(cut_abs, anchor_abs_ms + end_ms, remainder)
-        return analysis
+        self._reset_cycle(
+            cut_abs, self._cycle_start_abs_ms + length_ms, remainder
+        )
+        return emitted
 
     # ------------------------------------------------------------------
     # open-shot state
@@ -426,9 +481,8 @@ class ShotFocusService:
         self._cycle_reviewed_fps: Optional[float] = None
         self._cycle_reviewed_last_frame: Optional[int] = None
         self._cycle_events: List[int] = []
-        # Shot-axis frames already written out as tags. Non-zero only when
-        # max_tag_latency_seconds is flushing an open shot in pieces.
-        self._cycle_emitted_frames = 0
+        # How many tags this shot has produced so far, one per input file it
+        # covers. The emission frontier itself is stream-wide, not per cycle.
         self._cycle_parts = 0
         self._cycle_static_lock: Optional[float] = None
         # Where the focus was last actually observed, and how many samples ago,
@@ -448,10 +502,31 @@ class ShotFocusService:
         """
         ready = [frame for frame in self._cycle_pending if frame.frame_index < limit]
         if self.current_family is None:
-            seen_seconds = _frame_to_ms(limit, self._last_video_info.fps) / 1000.0
+            # The vote is gated on evidence *folded*, not on the commit
+            # horizon. Those are two independent delays -- the vote wants to
+            # have seen enough of the shot, the commit lag wants trajectory to
+            # stay clear of a late cut -- and measuring the first against the
+            # second made them additive: a shot's first tag waited
+            # family_determination_max_seconds AND the commit lag, one after
+            # the other. Gated this way they overlap, and the wait for the
+            # first tag is the larger of the two rather than their sum.
+            #
+            # The vote therefore reads all pending evidence, so it still sees a
+            # full family_determination_max_seconds of it. A cut can be
+            # reported up to SHOT_DETECTION_LOOKAHEAD_FRAMES late, so at most
+            # that many frames of what it counts may turn out to belong to the
+            # next shot -- four samples at the default rate, against fifty in
+            # the window. Closing a shot is different: there the cut is known,
+            # and the vote must not read past it.
+            if force_family:
+                decided_on, seen_frames = ready, limit
+            else:
+                decided_on = self._cycle_pending
+                seen_frames = self._abs_frames - self._cycle_start_abs
+            seen_seconds = _frame_to_ms(seen_frames, self._last_video_info.fps) / 1000.0
             if not force_family and seen_seconds < self.config.family_determination_max_seconds:
                 return
-            self.current_family, self.current_family_confidence = self._family_vote(ready)
+            self.current_family, self.current_family_confidence = self._family_vote(decided_on)
         if not ready:
             return
         self._cycle_pending = [

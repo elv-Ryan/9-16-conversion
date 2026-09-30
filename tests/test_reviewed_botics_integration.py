@@ -69,10 +69,7 @@ def service(mode='shot_file', detector=None, **params):
     s.model = Model(); s.x_sink = Sink()
     s.shot_detector = detector if mode == 'segment_file' else None
     s._apply_config()
-    s._shot_index = 0; s._abs_frames = 0; s._abs_ms = 0
-    s._last_source_media = None; s._last_video_info = None
-    s._last_abs_start = 0; s._last_abs_start_ms = 0
-    s._reset_cycle(0, 0)
+    s._reset_stream()
     return s
 
 
@@ -211,23 +208,39 @@ class RuntimeParity(unittest.TestCase):
         np.testing.assert_allclose(a.x_coordinates,expected,atol=1e-12,rtol=0)
 
 
+def restitch(tags,n=120):
+    """Per-file tags back into one X series over the absolute stream.
+
+    Framing is on the input files now, so a shot arrives as one tag per file
+    it covers. Everything these contracts assert about a shot's trajectory is
+    asserted about the reassembled series.
+    """
+    stream={}
+    for t in tags:
+        base=int(t.source_media.split('.')[0])*n+t.start_frame
+        for i,x in enumerate(t.x_coordinates):stream[base+i]=x
+    return [stream[k] for k in sorted(stream)]
+
+
 class StreamContracts(unittest.TestCase):
     def feed(self,s,n=6,fps=60.):
         completed=[]
         for k in range(n):completed.extend(s._consume_file(Video(str(k),fps=fps),evidence(fps=fps)))
         return completed
     def test_stream_matches_whole_shot_at_default_commit_lag(self):
-        s=service('segment_file',Detector());self.feed(s)
-        a=s.finalize()[0]
+        s=service('segment_file',Detector());out=self.feed(s)
+        a=restitch(out+s.finalize())
         w=service();b=w._consume_file(Video(n=720),evidence(n=720))[0]
-        np.testing.assert_allclose(a.x_coordinates,b.x_coordinates,rtol=0,atol=1e-12)
+        np.testing.assert_allclose(a,b.x_coordinates,rtol=0,atol=1e-12)
         np.testing.assert_allclose(s.x_sink.values,w.x_sink.values,rtol=0,atol=1e-12)
     def test_stream_partition_independence_with_identical_evidence(self):
         a,b=service('segment_file',Detector()),service('segment_file',Detector())
-        self.feed(a,6)
-        b._consume_file(Video('0',n=240),evidence(n=240));b._consume_file(Video('1',n=480),evidence(n=480))
-        aa,bb=a.finalize()[0],b.finalize()[0]
-        np.testing.assert_allclose(aa.x_coordinates,bb.x_coordinates,atol=1e-12,rtol=0)
+        outa=self.feed(a,6)
+        outb=b._consume_file(Video('0',n=240),evidence(n=240))
+        outb+=b._consume_file(Video('1',n=480),evidence(n=480))
+        aa=restitch(outa+a.finalize())
+        bb=restitch(outb+b.finalize(),n=240)
+        np.testing.assert_allclose(aa,bb,atol=1e-12,rtol=0)
     def test_runtime_survives_segment_boundary(self):
         s=service('segment_file',Detector());self.feed(s,5)
         r=s._cycle_reviewed_runtime;self.assertIsNotNone(r);previous=s._cycle_reviewed_last_frame
@@ -241,10 +254,16 @@ class StreamContracts(unittest.TestCase):
         s=service('segment_file',Detector());self.feed(s,5)
         self.assertEqual(s._commit_lag,300);self.assertTrue(s._cycle_indices)
         self.assertLess(max(s._cycle_indices),s._abs_frames-s._commit_lag)
-    def test_family_gate_timing_not_changed(self):
-        s=service('segment_file',Detector());self.feed(s,4)
+    def test_family_gate_waits_for_evidence_not_for_the_commit_lag(self):
+        # This used to pin the gate to the commit horizon, which made the vote
+        # window and the commit lag additive for a shot's first tag. The gate
+        # is measured on evidence folded now, so at 60fps the 5s window closes
+        # after three 2s files rather than after four. Trajectory values are
+        # unaffected -- the controller reads the same observations in the same
+        # order, it just starts reading them sooner.
+        s=service('segment_file',Detector());self.feed(s,2)
         self.assertIsNone(s.current_family);self.assertEqual(s.x_sink.values,[])
-        s._consume_file(Video('4'),evidence());self.assertEqual(s.current_family,'gameplay_follow')
+        s._consume_file(Video('2'),evidence());self.assertEqual(s.current_family,'gameplay_follow')
     def test_future_pending_evidence_does_not_change_committed_prefix(self):
         a,b=service('segment_file',Detector()),service('segment_file',Detector())
         self.feed(a,4);self.feed(b,4)
@@ -252,20 +271,26 @@ class StreamContracts(unittest.TestCase):
         b._consume_file(Video('4'),evidence(x=.25))
         self.assertEqual(a.x_sink.values,b.x_sink.values)
     def test_deferred_cut_resets_runtime_with_remainder(self):
-        s=service('segment_file',Detector({'5':[-10]}));self.feed(s,5)
+        s=service('segment_file',Detector({'5':[-10]}));out=self.feed(s,5)
         before=s._cycle_reviewed_runtime
-        shots=s._consume_file(Video('5'),evidence());self.assertEqual(len(shots),1)
-        first=shots[0];last=s.finalize()[0]
-        self.assertEqual((first.start_frame,first.frame_count),(-600,590))
-        self.assertEqual((last.start_frame,last.frame_count),(-10,130))
-        self.assertEqual(first.frame_count+last.frame_count,720)
+        out+=s._consume_file(Video('5'),evidence())
+        out+=s.finalize()
+        # Framed per file now, so the two shots are counted by shot_id and
+        # every tag is addressed to its own file at a non-negative offset.
+        first=[a for a in out if a.shot_id=='shot_000000']
+        last=[a for a in out if a.shot_id=='shot_000001']
+        self.assertEqual(sum(a.frame_count for a in first),590)
+        self.assertEqual(sum(a.frame_count for a in last),130)
+        self.assertEqual(sum(a.frame_count for a in out),720)
+        for a in out:self.assertGreaterEqual(a.start_frame,0)
         self.assertIsNot(s._cycle_reviewed_runtime,before)
     def test_committed_prefix_survives_late_cut(self):
-        s=service('segment_file',Detector({'5':[-10]}));self.feed(s,5)
+        s=service('segment_file',Detector({'5':[-10]}));out=self.feed(s,5)
         committed=list(zip(s._cycle_indices,s._cycle_smoothed))
         self.assertTrue(committed)
-        shot=s._consume_file(Video('5'),evidence())[0]
-        for fi,x in committed:self.assertAlmostEqual(shot.x_coordinates[fi],x,12)
+        out+=s._consume_file(Video('5'),evidence())
+        stream=restitch([a for a in out if a.shot_id=='shot_000000'])
+        for fi,x in committed:self.assertAlmostEqual(stream[fi],x,12)
     def test_cut_gap_free_tiling(self):
         s=service('segment_file',Detector({'0':[60],'2':[-5,90]}));out=self.feed(s,3)+s.finalize()
         self.assertEqual(sum(a.frame_count for a in out),360)
@@ -275,7 +300,12 @@ class StreamContracts(unittest.TestCase):
         self.assertEqual(len(shots),2);self.assertEqual(shots[0].x_coordinates,shots[1].x_coordinates)
     def test_micro_cut_guard_preserved(self):
         s=service('segment_file',Detector({'1':[10,12,16]}));out=self.feed(s,2)+s.finalize()
-        self.assertEqual(len(out),2);self.assertEqual([a.frame_count for a in out],[130,110])
+        # Two shots, not four: the 12 and 16 cuts are the same transition. Each
+        # is written per file it covers, so compare by shot_id.
+        by_shot={}
+        for a in out:by_shot.setdefault(a.shot_id,[]).append(a)
+        self.assertEqual(len(by_shot),2)
+        self.assertEqual(sorted(sum(a.frame_count for a in v) for v in by_shot.values()),[110,130])
     def test_no_output_without_inputs(self):
         s=service('segment_file',Detector());self.assertEqual(s.finalize(),[]);self.assertEqual(s.x_sink.values,[])
     def test_eof_flush_once(self):
@@ -469,14 +499,18 @@ class WireContract(unittest.TestCase):
         shot=s._consume_file(Video(),evidence())[0];tags=tags_for_analysis(shot,s.config)
         self.assertEqual(len(tags),2);self.assertEqual(tags[1].track,'focus')
         self.assertEqual(len(tags[0].additional_info['focus_samples']),20)
-    def test_negative_offsets_survive_tag_serialization(self):
+    def test_a_deferred_cut_is_addressed_to_the_file_it_belongs_to(self):
+        # This used to assert the opposite: a tag anchored to whatever file was
+        # in hand, with a negative frame_idx. Framing is on the input files
+        # now, so a cut deferred into the previous file produces a tag that
+        # names that file and starts at zero.
         from nba_yolo_shot_tagger.contract import tags_for_analysis
         s=service('segment_file',Detector({'1':[-10]}))
         s._consume_file(Video('0'),evidence())
         shot=s._consume_file(Video('1'),evidence())[0]
         tag=tags_for_analysis(shot,s.config)[0]
-        self.assertEqual(tag.source_media,'1');self.assertEqual(tag.frame_info,{'frame_idx':-120})
-        self.assertLess(tag.start_time,0);self.assertEqual(tag.additional_info['frame_count'],110)
+        self.assertEqual(tag.source_media,'0');self.assertEqual(tag.frame_info,{'frame_idx':0})
+        self.assertEqual(tag.start_time,0);self.assertEqual(tag.additional_info['frame_count'],110)
     def test_producer_progress_after_shot_output(self):
         from nba_yolo_shot_tagger.producer import NbaShotFocusProducer
         s=service();shot=s._consume_file(Video(),evidence())[0]

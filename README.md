@@ -772,6 +772,26 @@ The primary output track is `vertical_video`. The tag's
 `additional_info["x-coordinates"]` contains exactly one legal normalized crop
 center per source frame.
 
+Tags are framed on the **input files**, not on shots. Each tag describes frames
+of one input file and is addressed to it, so `source_frame_start` and
+`start_time` are relative to that file and never negative.
+
+- `shot_file`: one tag per input file.
+- `segment_file`: one tag per input file, plus one extra per shot boundary that
+  lands inside it — a segment containing a cut produces a tag for the piece
+  before the cut and another for the piece after.
+
+A shot spanning several segments therefore arrives as one tag per segment, all
+sharing its `shot_id`, with `shot_part` / `shot_part_final` in
+`additional_info` recording the order and which one closed the shot.
+
+A segment's tag is written once its frames are final, which is normally a
+segment or two after it arrived. Three settings govern that delay:
+`family_determination_max_seconds` (nothing can be labelled before the family
+vote), `trajectory_commit_lag_frames` (nothing is final inside shot detection's
+lookahead), and in `segment_file` the detector's own lookahead. Tags for a
+segment are emitted after that segment's `progress` message.
+
 ## Runtime families
 
 - `active_speaker`
@@ -820,7 +840,6 @@ See:
   "max_detections": 20,
   "use_fp16": true,
   "input_mode": "shot_file",
-  "max_tag_latency_seconds": 0.0,
   "min_shot_seconds": 0.25,
   "hold_and_cut_families": "active_speaker",
   "min_hold_seconds": 0.7,

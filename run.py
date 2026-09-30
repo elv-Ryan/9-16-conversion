@@ -11,7 +11,7 @@ from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 
 from nba_yolo_shot_tagger.config import config_from_params
 from nba_yolo_shot_tagger.producer import NbaShotFocusProducer
-from nba_yolo_shot_tagger.live import FabricSink, NoopSink
+from nba_yolo_shot_tagger.live import FabricSink, FileSink, NoopSink
 from nba_yolo_shot_tagger.service import ShotFocusService
 
 
@@ -80,11 +80,13 @@ def main() -> None:
             base_url="https://host-76-74-29-13.contentfabric.io",
             live_q=live_q,
             tok=tok,
-            data_stream=config.live_data_stream
+            data_stream= config.live_data_stream ## "vertical"
         )
     else:
         sink = NoopSink()
 
+    sink = FileSink("hardcode_file_sink_test")
+    
     service = ShotFocusService(config, sink)
 
     producer = NbaShotFocusProducer(config, service)

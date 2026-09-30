@@ -26,3 +26,6 @@ podman-test:
 	DEVICE=$${DEVICE:-0} IMAGE=$(IMAGE_NAME):$(IMAGE_TAG) ./scripts/test_podman_shot.sh "$(TEST_SHOT)"
 
 protocol-test: podman-test
+
+test-seg:
+	MODEL_PARAMS='{"input_mode":"segment_file"}' make test
