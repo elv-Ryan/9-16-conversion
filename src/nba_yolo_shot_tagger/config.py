@@ -82,6 +82,25 @@ class RuntimeConfig:
     # Only segment_file detects its own cuts. shot_file boundaries are declared
     # by the caller, so they are always honoured however short the file is.
     min_shot_seconds: float = 0.75
+    # How much committed trajectory may accumulate inside a still-open shot
+    # before it is flushed as a tag, in seconds of content. Tags have always
+    # been built only when a shot closes, so a shot that runs across twenty
+    # segments produces nothing until the twenty-first -- fine for a batch
+    # job, useless for a live stream.
+    #
+    # Setting this emits the committed prefix of an open shot as its own tag,
+    # carrying the same shot_id and its own source_frame_start/frame_count, so
+    # a consumer assembles a shot from its parts the same way it already
+    # assembles a stream from its segments. Only values that can no longer
+    # change are ever emitted -- the span ends at the last committed sample.
+    #
+    # 0 disables it and reproduces the historical behaviour exactly.
+    #
+    # Total latency to a tag is this plus the two delays that already exist:
+    # family_determination_max_seconds (nothing can be labelled before the
+    # vote) and trajectory_commit_lag_frames (nothing is final inside shot
+    # detection's lookahead).
+    max_tag_latency_seconds: float = 0.0
     # Resolved per input_mode in __post_init__ when not supplied explicitly.
     family_determination_max_seconds: Optional[float] = None
     # How far behind the decoded frames the X trajectory is committed, in
@@ -181,6 +200,7 @@ def config_from_params(params: Mapping[str, Any]) -> RuntimeConfig:
         "max_shot_seconds",
         "min_shot_seconds",
         "min_hold_seconds",
+        "max_tag_latency_seconds",
         "family_determination_max_seconds",
         "target_aspect_width_over_height",
     }
@@ -239,6 +259,8 @@ def _validate(config: RuntimeConfig) -> None:
         raise ValueError("target_aspect_width_over_height is invalid")
     if not (0 <= config.coordinate_decimals <= 9):
         raise ValueError("coordinate_decimals must be between 0 and 9")
+    if not (0.0 <= config.max_tag_latency_seconds <= 3600.0):
+        raise ValueError("max_tag_latency_seconds must be between 0 and 3600")
     if not (0.0 <= config.min_hold_seconds <= 30.0):
         raise ValueError("min_hold_seconds must be between 0 and 30")
     unknown_families = sorted(parse_hold_and_cut_families(config.hold_and_cut_families) - set(EXPECTED_FAMILIES))

@@ -4,9 +4,11 @@ from nba_yolo_shot_tagger.config import RuntimeConfig, config_from_params
 
 
 class RuntimeConfigTests(unittest.TestCase):
-    def test_defaults_are_shot_first(self):
+    def test_deployed_defaults(self):
+        # These track the deployed tuning on purpose: if one moves, this test
+        # is where the change gets noticed and acknowledged.
         config = config_from_params({"continue_on_error": True})
-        self.assertEqual(config.input_mode, "shot_file")
+        self.assertEqual(config.input_mode, "segment_file")
         self.assertEqual(config.output_track, "vertical_video")
         self.assertEqual(config.imgsz, 1280)
         self.assertEqual(config.inference_fps, 10.0)
@@ -20,7 +22,7 @@ class RuntimeConfigTests(unittest.TestCase):
         segment_file = config_from_params({"input_mode": "segment_file"})
         # shot_file inputs are whole shots, so the whole file feeds the vote.
         self.assertEqual(shot_file.family_determination_max_seconds, 999999.0)
-        self.assertEqual(segment_file.family_determination_max_seconds, 3.0)
+        self.assertEqual(segment_file.family_determination_max_seconds, 5.0)
 
     def test_explicit_family_determination_wins_over_the_mode_default(self):
         config = config_from_params(
@@ -70,7 +72,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config_from_params({"max_detections": 300}).max_detections, 300)
 
     def test_min_shot_seconds_is_bounded_and_below_max(self):
-        self.assertEqual(config_from_params({}).min_shot_seconds, 0.25)
+        self.assertEqual(config_from_params({}).min_shot_seconds, 0.75)
         with self.assertRaisesRegex(ValueError, "min_shot_seconds"):
             config_from_params({"min_shot_seconds": -1.0})
         with self.assertRaisesRegex(ValueError, "min_shot_seconds"):

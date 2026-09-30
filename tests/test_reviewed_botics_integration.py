@@ -482,8 +482,14 @@ class WireContract(unittest.TestCase):
         s=service();shot=s._consume_file(Video(),evidence())[0]
         with patch.object(s,'analyze_file',return_value=[shot]):
             output=list(NbaShotFocusProducer(s.config,s).produce(['a.mp4']))
-        self.assertIsInstance(output[0],self.fixtures.FakeTag)
-        self.assertIsInstance(output[-1],self.fixtures.FakeProgress)
-        self.assertFalse(any(isinstance(v,self.fixtures.FakeError) for v in output))
+        # Assert against the classes the producer actually emits. Re-executing
+        # the fixture file under a second module name makes a second set of
+        # Fake* classes, while sys.modules keeps the first -- so comparing to
+        # self.fixtures.* passes alone and fails once the fixture file has also
+        # been imported under its own name by the rest of the suite.
+        from common_ml.tagging.messages import Error, Progress, Tag
+        self.assertIsInstance(output[0],Tag)
+        self.assertIsInstance(output[-1],Progress)
+        self.assertFalse(any(isinstance(v,Error) for v in output))
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -233,6 +233,12 @@ class ShotFocusService:
         # Then catch up / keep up on the shot that is still open.
         self._advance(self._abs_frames - self._commit_lag - self._cycle_start_abs)
 
+        # ...and write out what that settled, if the caller asked for tags
+        # before the shot ends.
+        partial = self._flush_partial()
+        if partial is not None:
+            completed.append(partial)
+
         if (self._abs_ms - self._cycle_start_abs_ms) / 1000.0 >= self.config.max_shot_seconds:
             # Safety valve: an open shot is held in memory, and a stream can
             # run a long way without a detected cut.
@@ -261,6 +267,79 @@ class ShotFocusService:
         )
         self._abs_frames = abs_start + info.frame_count
         self._abs_ms = abs_start_ms + info.duration_ms
+
+    def _emit_span(self, span_end: int, *, is_final: bool) -> Optional[ShotAnalysis]:
+        """Emit committed trajectory for [already emitted, ``span_end``).
+
+        ``span_end`` is on the open shot's own frame axis. Everything is
+        anchored to the file currently being processed, exactly as a whole-shot
+        emission is, so a span that began before that file simply carries a
+        more negative offset.
+        """
+        span_start = self._cycle_emitted_frames
+        if span_end <= span_start or self.current_family is None:
+            return None
+        info = self._last_video_info
+        anchor_abs = self._last_abs_start
+        anchor_abs_ms = self._last_abs_start_ms
+
+        shot_start_frame = self._cycle_start_abs - anchor_abs
+        shot_start_ms = self._cycle_start_abs_ms - anchor_abs_ms
+        start_frame = shot_start_frame + span_start
+        end_frame = shot_start_frame + span_end
+        start_ms = shot_start_ms + _frame_to_ms(span_start, info.fps)
+        # A sub-millisecond span must still be a non-empty interval.
+        end_ms = max(_frame_to_ms(end_frame, info.fps), start_ms + 1)
+
+        # The whole committed sample series is handed over, not just this
+        # span's slice: interpolation at the left edge needs the sample before
+        # the span, and expand_to_source_frames takes only the frames asked for.
+        analysis = self._build_shot_analysis(
+            source_media=self._last_source_media,
+            shot_id=f"shot_{self._shot_index:06d}",
+            start_ms=start_ms,
+            end_ms=end_ms,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            info=info,
+            sample_frame_indices=[
+                index + shot_start_frame for index in self._cycle_indices
+            ],
+            sample_x=self._cycle_smoothed,
+            sample_events=self._cycle_events,
+            focus_samples=[
+                replace(
+                    sample,
+                    frame_index=sample.frame_index + shot_start_frame,
+                    timestamp_ms=sample.timestamp_ms + shot_start_ms,
+                )
+                for sample in self._cycle_focus
+                if span_start <= sample.frame_index < span_end
+            ],
+            part_index=self._cycle_parts,
+            is_final=is_final,
+        )
+        self._cycle_emitted_frames = span_end
+        self._cycle_parts += 1
+        return analysis
+
+    def _flush_partial(self) -> Optional[ShotAnalysis]:
+        """Write out the open shot's committed prefix, if it has grown enough.
+
+        Stops at the last committed sample rather than at the commit horizon:
+        the frames after it interpolate toward a sample that has not arrived,
+        so their values are not yet final and must not be published.
+        """
+        if self.config.max_tag_latency_seconds <= 0.0:
+            return None
+        if self.current_family is None or not self._cycle_indices:
+            return None
+        info = self._last_video_info
+        span_end = self._cycle_indices[-1] + 1
+        pending_ms = _frame_to_ms(span_end - self._cycle_emitted_frames, info.fps)
+        if pending_ms < 1000.0 * self.config.max_tag_latency_seconds:
+            return None
+        return self._emit_span(span_end, is_final=False)
 
     def _close(self, cut_abs: int, *, force: bool = False) -> Optional[ShotAnalysis]:
         """Cut the open shot at an absolute stream frame and emit it.
@@ -293,33 +372,15 @@ class ShotFocusService:
         # was due, and the trajectory for whatever was still being held back.
         self._advance(length, force_family=True)
 
-        start_frame = self._cycle_start_abs - anchor_abs
+        # Whatever of this shot has not already been written out. With
+        # max_tag_latency_seconds off that is the entire shot, which is the
+        # historical single-tag emission.
+        analysis = self._emit_span(length, is_final=True)
+        self._shot_index += 1
+
         end_frame = cut_abs - anchor_abs
         start_ms = self._cycle_start_abs_ms - anchor_abs_ms
-        # A sub-millisecond shot must still be a non-empty interval.
         end_ms = max(_frame_to_ms(end_frame, info.fps), start_ms + 1)
-
-        analysis = self._build_shot_analysis(
-            source_media=self._last_source_media,
-            shot_id=f"shot_{self._shot_index:06d}",
-            start_ms=start_ms,
-            end_ms=end_ms,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            info=info,
-            sample_frame_indices=[index + start_frame for index in self._cycle_indices],
-            sample_x=self._cycle_smoothed,
-            sample_events=self._cycle_events,
-            focus_samples=[
-                replace(
-                    sample,
-                    frame_index=sample.frame_index + start_frame,
-                    timestamp_ms=sample.timestamp_ms + start_ms,
-                )
-                for sample in self._cycle_focus
-            ],
-        )
-        self._shot_index += 1
 
         # Whatever came after the cut opens the next shot. It was never
         # committed, so it carries over as raw evidence and is re-decided.
@@ -365,6 +426,10 @@ class ShotFocusService:
         self._cycle_reviewed_fps: Optional[float] = None
         self._cycle_reviewed_last_frame: Optional[int] = None
         self._cycle_events: List[int] = []
+        # Shot-axis frames already written out as tags. Non-zero only when
+        # max_tag_latency_seconds is flushing an open shot in pieces.
+        self._cycle_emitted_frames = 0
+        self._cycle_parts = 0
         self._cycle_static_lock: Optional[float] = None
         # Where the focus was last actually observed, and how many samples ago,
         # so association survives a batch boundary the way smoothing context
@@ -676,6 +741,8 @@ class ShotFocusService:
         sample_x: Sequence[float],
         focus_samples: Sequence[FocusSample],
         sample_events: Optional[Sequence[int]] = None,
+        part_index: int = 0,
+        is_final: bool = True,
     ) -> ShotAnalysis:
         crop_width, legal_min, legal_max = legal_crop_geometry(
             info.width, info.height, self.config.target_aspect_width_over_height
@@ -706,6 +773,8 @@ class ShotFocusService:
             x_coordinates=tuple(float(value) for value in expanded),
             focus_samples=tuple(focus_samples),
             model=self.model.identity,
+            part_index=part_index,
+            is_final=is_final,
         )
 
 

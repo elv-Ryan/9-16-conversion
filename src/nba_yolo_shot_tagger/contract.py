@@ -88,6 +88,11 @@ def tags_for_analysis(analysis: ShotAnalysis, config: RuntimeConfig) -> List[Tag
             "class_names": list(analysis.model.class_names),
         },
     }
+    if analysis.part_index > 0 or not analysis.is_final:
+        # Only present when a shot really was split, so a whole-shot tag looks
+        # exactly as it always has.
+        additional_info["shot_part"] = int(analysis.part_index)
+        additional_info["shot_part_final"] = bool(analysis.is_final)
     if config.include_focus_samples:
         additional_info["focus_samples"] = [
             _focus_sample(sample, decimals) for sample in analysis.focus_samples

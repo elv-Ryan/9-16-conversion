@@ -820,6 +820,7 @@ See:
   "max_detections": 20,
   "use_fp16": true,
   "input_mode": "shot_file",
+  "max_tag_latency_seconds": 0.0,
   "min_shot_seconds": 0.25,
   "hold_and_cut_families": "active_speaker",
   "min_hold_seconds": 0.7,

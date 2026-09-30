@@ -69,3 +69,8 @@ class ShotAnalysis:
     x_coordinates: Sequence[float]
     focus_samples: Sequence[FocusSample]
     model: ModelIdentity
+    # A shot emitted in pieces while it is still open: ``part_index`` counts
+    # the pieces, ``is_final`` marks the one that closed the shot. A shot
+    # emitted whole -- the default -- is part 0 and final.
+    part_index: int = 0
+    is_final: bool = True
