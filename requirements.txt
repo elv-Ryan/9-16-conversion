@@ -1,4 +1,5 @@
 common-ml @ git+https://github.com/eluv-io/common-ml.git@5e112f615acb0a13fa044ea4dacc94ab1612d9ef
+elv-client-py @ git+https://github.com/eluv-io/elv-client-py.git
 loguru==0.7.3
 numpy>=1.26,<2.3
 opencv-python==4.12.0.88

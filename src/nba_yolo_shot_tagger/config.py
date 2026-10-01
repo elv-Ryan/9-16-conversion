@@ -74,6 +74,9 @@ class RuntimeConfig:
     max_detections: int = 100
     top_k: int = 20
     use_fp16: bool = False
+
+
+    fabric_live_post: str = "https://host-76-74-29-13.contentfabric.io/"
     live_data_stream: str = ""
 
     input_mode: str = "segment_file"
